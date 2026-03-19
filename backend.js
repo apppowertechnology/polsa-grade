@@ -13,6 +13,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- Root Route ---
+app.get('/', (req, res) => {
+    res.send('Backend is running!');
+});
+
 // --- Firebase Initialization ---
 let db;
 let initError = null;
@@ -21,7 +26,7 @@ try {
     // Initialize Firebase Admin SDK
     if (!admin.apps.length) {
         const privateKey = process.env.FIREBASE_PRIVATE_KEY 
-            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') 
+            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim() 
             : undefined;
 
         admin.initializeApp({
@@ -52,7 +57,7 @@ try {
 }
 
 const VTU_API_KEY = process.env.VTU_API_KEY;
-const MASKAWA_BASE_URL = 'https://maskawasub.com/api/';
+const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
 
 // --- Helper Functions ---
 
@@ -69,16 +74,40 @@ const getNetworkId = (networkStr) => {
 
 // --- API Helper ---
 async function callApi(endpoint, payload) {
-    const response = await axios.post(`${MASKAWA_BASE_URL}${endpoint}`, payload, {
-        headers: {
-            'Authorization': `Token ${VTU_API_KEY}`,
-            'Content-Type': 'application/json'
-        }
-    });
-    return response.data;
+    const url = `${MASKAWA_BASE_URL}/${endpoint}`;
+    console.log(`Calling VTU API: ${url}`);
+    try {
+        const response = await axios.post(url, payload, {
+            headers: {
+                'Authorization': `Token ${VTU_API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        return response.data;
+    } catch (error) {
+        // Append URL to error message for debugging 404s
+        error.message = `External API Error [${url}]: ${error.message}`;
+        throw error;
+    }
 }
 
 // --- Endpoints ---
+
+// Get Wallet Balance
+app.get('/api/wallet/:userId', async (req, res) => {
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ success: false, message: 'Missing userId' });
+
+    try {
+        if (!db) throw new Error('Backend not connected to Firebase');
+        const snapshot = await db.ref(`users/${userId}/walletBalance`).once('value');
+        const balance = Number(snapshot.val()) || 0;
+        res.json({ success: true, balance });
+    } catch (error) {
+        console.error('Wallet Error:', error.message);
+        res.status(500).json({ success: false, message: 'Failed to fetch wallet balance' });
+    }
+});
 
 // Matches /api/recharge used in frontend Bills.js
 app.post('/api/recharge', async (req, res) => {
@@ -171,5 +200,10 @@ app.post('/api/recharge', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+// --- 404 Handler for Unknown Routes ---
+app.use((req, res) => {
+    res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+const PORT = process.env.PORT || 5500;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
