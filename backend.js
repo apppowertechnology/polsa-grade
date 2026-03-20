@@ -75,7 +75,7 @@ const getNetworkId = (networkStr) => {
 // --- API Helper ---
 async function callApi(endpoint, payload) {
     const url = `${MASKAWA_BASE_URL}/${endpoint}`;
-    console.log(`Calling VTU API: ${url}`);
+    console.log(`Calling VTU API: ${url} | Payload: ${JSON.stringify(payload)}`);
     try {
         const response = await axios.post(url, payload, {
             headers: {
@@ -85,8 +85,15 @@ async function callApi(endpoint, payload) {
         });
         return response.data;
     } catch (error) {
-        // Append URL to error message for debugging 404s
-        error.message = `External API Error [${url}]: ${error.message}`;
+        // Extract detailed error from provider if available
+        let detailedMsg = error.message;
+        if (error.response && error.response.data) {
+            const data = error.response.data;
+            // Check for common error fields from Django/DRF APIs (detail, message, error, or object keys)
+            detailedMsg = data.detail || data.message || data.error || (typeof data === 'object' ? JSON.stringify(data) : data);
+            console.error(`API Error Response: ${JSON.stringify(data)}`);
+        }
+        error.message = `Provider Error: ${detailedMsg}`;
         throw error;
     }
 }
@@ -172,7 +179,8 @@ app.post('/api/recharge', async (req, res) => {
             payload = {
                 network: networkId,
                 plan: plan,
-                mobile_number: phone_number
+                mobile_number: phone_number,
+                Ported_number: true
             };
         } else if (service === 'recharge-card') {
             endpoint = 'epin/'; // Ensure endpoint is singular 'epin/' to prevent 404
