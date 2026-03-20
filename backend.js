@@ -111,10 +111,30 @@ app.get('/api/wallet/:userId', async (req, res) => {
 
 // Matches /api/recharge used in frontend Bills.js
 app.post('/api/recharge', async (req, res) => {
-    const { userId, service, amount, network, phone_number, plan, quantity } = req.body;
+    const { userId, service, amount, network, phone_number, plan, planName, quantity } = req.body;
 
-    if (!userId || !amount || !service) {
-        return res.status(400).json({ success: false, message: 'Missing required fields' });
+    // Generate a local request ID for tracing logs
+    const requestId = `req_${Date.now()}`;
+
+    // --- 1. Disable / Freeze Recharge Card Feature ---
+    if (service === 'recharge-card') {
+        return res.status(403).json({ 
+            success: false, 
+            message: 'Recharge card purchase is currently unavailable. Please use airtime or data services.' 
+        });
+    }
+
+    // Enhanced validation for mandatory fields
+    if (!userId || !service || !amount) {
+        return res.status(400).json({ success: false, message: 'Missing required fields: userId, service, and amount are mandatory.' });
+    }
+
+    // Service-specific field validation
+    if (service === 'data' && (!plan || !network || !phone_number)) {
+        return res.status(400).json({ success: false, message: 'For Data purchases, you must provide a plan, network, and phone number.' });
+    }
+    if (service === 'airtime' && (!network || !phone_number || phone_number.length < 10)) {
+        return res.status(400).json({ success: false, message: 'For Airtime purchases, you must provide a valid network and phone number.' });
     }
 
     const cost = Number(amount);
@@ -155,7 +175,7 @@ app.post('/api/recharge', async (req, res) => {
                 mobile_number: phone_number
             };
         } else if (service === 'recharge-card') {
-            endpoint = 'epins/';
+            endpoint = 'epin/'; // Ensure endpoint is singular 'epin/' to prevent 404
             payload = {
                 network: networkId,
                 amount: cost, 
@@ -167,36 +187,104 @@ app.post('/api/recharge', async (req, res) => {
 
         // 3. Call Maskawa API
         const data = await callApi(endpoint, payload);
+        console.log(`[${requestId}] API Response for ${service}:`, JSON.stringify(data));
 
-        // 4. Check API Success 
-        // (Maskawa typically returns a Status field, or implicit success with data)
-        if (data.Status && data.Status !== 'successful' && !data.pin && !data.pins && !data.token) {
-            throw new Error(data.message || data.error || 'Provider transaction failed');
+        // 4. Check API Success (Relaxed Logic)
+        // We treat it as success unless there is an explicit failure status.
+        // This prevents false errors when the API returns variations of success messages.
+        const isExplicitFailure = 
+            (data.Status && String(data.Status).toLowerCase().includes('fail')) ||
+            (data.status && String(data.status).toLowerCase().includes('fail')) ||
+            (data.success === 'false') ||
+            (data.success === false);
+
+        if (isExplicitFailure) {
+            throw new Error(data.message || data.error || 'Provider returned failure status');
         }
 
         // 5. Deduct Balance Atomically
         await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
 
         // 6. Log Transaction
+        // Fix: Ensure plan is never undefined. Use "Airtime" as fallback for airtime service.
+        const safePlan = plan || (service === 'airtime' ? 'Airtime' : 'Standard');
+
+        // Construct details object explicitly to prevent undefined values
+        const details = {
+            network: network || 'N/A',
+            phone: phone_number || 'N/A',
+            plan: safePlan,
+            ...(planName && { planName }), // Only add if defined
+            ...(quantity && { quantity })  // Only add if defined
+        };
+
         const txData = {
             type: 'purchase',
             feature: service,
             amount: cost,
             status: 'Successful',
+            transactionId: requestId,
             date: new Date().toISOString(),
-            details: { network, phone: phone_number, plan, quantity }
+            details: details
         };
         
-        await db.ref(`transactions/${userId}`).push(txData);
-        await db.ref('payments').push({ ...txData, userId }); // Admin log
+        const txRef = await db.ref(`transactions/${userId}`).push(txData);
+        const firebaseTxId = txRef.key;
+        await db.ref('payments').push({ ...txData, userId, firebaseTxId }); // Admin log
 
         // 7. Return Success
         const pins = data.pins || (data.pin ? [data.pin] : (data.token ? [data.token] : []));
-        res.json({ success: true, message: 'Transaction successful', pins: pins, data: data });
+        
+        const response = {
+            success: true,
+            message: service === 'recharge-card' ? 'Recharge card generated successfully' : 'Transaction successful',
+            data: {
+                ...data,
+                receipt: {
+                    ...txData,
+                    transactionId: firebaseTxId
+                }
+            }
+        };
+
+        if (service === 'recharge-card') {
+            const primaryPin = pins.length > 0 ? (pins[0].pin || pins[0]) : "Check Transaction History";
+            response.pin = primaryPin;
+            response.network = network;
+            response.amount = cost;
+        }
+
+        res.json(response);
 
     } catch (error) {
         console.error('Recharge Error:', error.response?.data || error.message);
         res.status(500).json({ success: false, message: error.response?.data?.message || error.message || 'Transaction failed' });
+    }
+});
+
+// Get Transaction History
+app.get('/api/transactions/:userId', async (req, res) => {
+    const { userId } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+
+    if (!userId) return res.status(400).json({ success: false, message: 'Missing userId' });
+
+    try {
+        if (!db) throw new Error('Backend not connected to Firebase');
+
+        const snapshot = await db.ref(`transactions/${userId}`).limitToLast(limit).once('value');
+        const transactions = [];
+        
+        // snapshot.forEach iterates in key order (oldest to newest for push IDs)
+        // We unshift to reverse array so newest is first
+        snapshot.forEach(child => {
+            transactions.unshift({ id: child.key, ...child.val() });
+        });
+
+        res.json({ success: true, transactions });
+    } catch (error) {
+        console.error('History Error:', error.message);
+        res.status(500).json({ success: false, message: 'Failed to fetch history' });
     }
 });
 
