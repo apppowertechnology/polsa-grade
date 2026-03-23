@@ -347,20 +347,24 @@ app.post('/api/recharge', async (req, res) => {
         res.json(response);
 
     } catch (error) {
-        console.error('Recharge Error:', error.response?.data || error.message);
+        // Extract detailed error message from provider response
+        const errData = error.response?.data || {};
+        const msg = (typeof errData === 'string' ? errData : (errData.message || errData.msg || errData.error || errData.detail)) || error.message || 'Transaction failed';
+        
+        console.error('Recharge Error:', errData || error.message);
         
         // Update logs to Failed
         if (userTxRef && adminTxRef) {
             const failUpdate = { 
                 status: 'Failed', 
-                reason: error.message,
-                providerResponse: error.response?.data || null
+                reason: msg,
+                providerResponse: errData || null
             };
             userTxRef.update(failUpdate).catch(console.error);
             adminTxRef.update(failUpdate).catch(console.error);
         }
 
-        res.status(500).json({ success: false, message: error.response?.data?.message || error.message || 'Transaction failed' });
+        res.status(500).json({ success: false, message: msg });
     }
 });
 
