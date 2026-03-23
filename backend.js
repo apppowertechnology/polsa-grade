@@ -444,7 +444,7 @@ app.get('/api/daltech/plans', async (req, res) => {
         const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
         // Note: This endpoint assumes Daltech supports GET on the base URL for plans.
         // If they use a specific path like /plans or /prices, update the URL below.
-        const response = await axios.get('https://daltechsubapi.com.ng/api/rechargepin/', {
+        const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
             headers: { 'Authorization': `Token ${DALTECH_KEY}` }
         });
         res.json({ success: true, data: response.data });
