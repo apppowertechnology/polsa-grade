@@ -149,7 +149,7 @@ app.post('/api/recharge', async (req, res) => {
         return res.status(400).json({ success: false, message: 'For Airtime purchases, you must provide a valid network and phone number.' });
     }
 
-    const cost = Number(amount);
+    let cost = Number(amount);
     const networkId = getNetworkId(network);
 
     // Declare refs outside try block to ensure they are accessible in catch for status updates
@@ -158,6 +158,15 @@ app.post('/api/recharge', async (req, res) => {
     try {
         if (!db) {
             throw new Error(`Backend not connected to Firebase: ${initError || 'Check server logs.'}`);
+        }
+
+        // Calculate correct cost for recharge cards (considering quantity and discount)
+        if (service === 'recharge-card') {
+            const discountSnap = await db.ref('settings/recharge_card/enable_discount').once('value');
+            if (discountSnap.val()) {
+                cost = Math.max(0, cost - 1);
+            }
+            cost = cost * (Number(quantity) || 1);
         }
 
         // 1. Prepare Transaction Data & Log Pending State Immediately
@@ -373,6 +382,26 @@ app.get('/api/transactions/:userId', async (req, res) => {
     } catch (error) {
         console.error('History Error:', error.message);
         res.status(500).json({ success: false, message: 'Failed to fetch history' });
+    }
+});
+
+// Update Recharge Card Discount Setting
+app.post('/api/settings/recharge-discount', async (req, res) => {
+    const { enabled } = req.body;
+
+    if (enabled === undefined || typeof enabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'Invalid payload: "enabled" (boolean) is required.' });
+    }
+
+    try {
+        if (!db) throw new Error('Backend not connected to Firebase');
+        
+        await db.ref('settings/recharge_card/enable_discount').set(enabled);
+        
+        res.json({ success: true, message: `Recharge card discount ${enabled ? 'enabled' : 'disabled'} successfully.` });
+    } catch (error) {
+        console.error('Settings Update Error:', error.message);
+        res.status(500).json({ success: false, message: 'Failed to update settings.' });
     }
 });
 
