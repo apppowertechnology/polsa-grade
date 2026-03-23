@@ -239,10 +239,32 @@ app.post('/api/recharge', async (req, res) => {
                 const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
                 const ref = `EPIN_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
+                // Lookup Plan ID: Strictly from DB Configuration
+                const plansSnap = await db.ref('settings/recharge_card/plans').once('value');
+                const dbPlans = plansSnap.val();
+
+                if (!dbPlans) {
+                    throw new Error('Recharge card system is not configured. Please contact support.');
+                }
+
+                const networkPlans = dbPlans[String(networkId)];
+                if (!networkPlans) {
+                    throw new Error(`No recharge plans configured for Network ID ${networkId}.`);
+                }
+
+                // Direct mapping: Amount -> Plan ID
+                const planId = networkPlans[String(amount)];
+
+                if (!planId) {
+                    // Provide helpful error with available options
+                    const available = Object.keys(networkPlans).map(amt => `₦${amt}`).join(', ');
+                    throw new Error(`Invalid amount (₦${amount}). Available: ${available}`);
+                }
+
                 const rcPayload = {
                     network: String(networkId),
                     quantity: String(quantity || 1),
-                    plan: String(amount), // Send UNIT price (denomination), not total cost
+                    plan: planId, // Send the mapped Plan ID (e.g., '5') instead of '100'
                     businessname: "Prime Biller",
                     ref: ref
                 };
@@ -411,6 +433,44 @@ app.post('/api/settings/recharge-discount', async (req, res) => {
     } catch (error) {
         console.error('Settings Update Error:', error.message);
         res.status(500).json({ success: false, message: 'Failed to update settings.' });
+    }
+});
+
+// --- Dynamic Plan Management ---
+
+// Fetch Plans from Daltech (Utility Endpoint for Admin Inspection)
+app.get('/api/daltech/plans', async (req, res) => {
+    try {
+        const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
+        // Note: This endpoint assumes Daltech supports GET on the base URL for plans.
+        // If they use a specific path like /plans or /prices, update the URL below.
+        const response = await axios.get('https://daltechsubapi.com.ng/api/rechargepin/', {
+            headers: { 'Authorization': `Token ${DALTECH_KEY}` }
+        });
+        res.json({ success: true, data: response.data });
+    } catch (error) {
+        console.error('Daltech Fetch Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Failed to fetch plans from provider', 
+            error: error.message,
+            providerResponse: error.response?.data 
+        });
+    }
+});
+
+// Save Plan Mapping to Firebase
+app.post('/api/settings/rc-plans', async (req, res) => {
+    // Expected payload: { "1": { "100": "5", "200": "6" }, "2": { ... } }
+    const mappings = req.body;
+    if (!mappings || typeof mappings !== 'object') {
+        return res.status(400).json({ success: false, message: 'Invalid mapping data' });
+    }
+    try {
+        await db.ref('settings/recharge_card/plans').set(mappings);
+        res.json({ success: true, message: 'Recharge card plan mappings updated successfully.' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 
