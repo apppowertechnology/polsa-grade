@@ -225,14 +225,11 @@ app.post('/api/recharge', async (req, res) => {
         if (service === 'recharge-card') {
             // --- RECHARGE CARD SPECIFIC FLOW (DALTECHSUB) ---
             
-            // A. Deduct Wallet BEFORE API Call
-            const deductionResult = await userRef.child('walletBalance').transaction(current => {
-                const bal = Number(current) || 0;
-                if (bal < cost) return; // Abort transaction if insufficient
-                return bal - cost;
-            });
-
-            if (!deductionResult.committed) {
+            // A. Validate Balance (No deduction yet)
+            const balanceSnap = await userRef.child('walletBalance').once('value');
+            const currentBal = Number(balanceSnap.val()) || 0;
+            
+            if (currentBal < cost) {
                 throw new Error('Insufficient wallet balance.');
             }
 
@@ -245,7 +242,7 @@ app.post('/api/recharge', async (req, res) => {
                 const rcPayload = {
                     network: String(networkId),
                     quantity: String(quantity || 1),
-                    plan: String(cost), // Daltech expects amount as 'plan' or denomination
+                    plan: String(amount), // Send UNIT price (denomination), not total cost
                     businessname: "Prime Biller",
                     ref: ref
                 };
@@ -259,11 +256,15 @@ app.post('/api/recharge', async (req, res) => {
                 });
 
                 data = response.data;
+                console.log("Daltech Response:", JSON.stringify(data));
                 
                 // Validate Success
-                const isSuccess = data.status === 'success' || data.Status === 'successful';
+                // Daltech success is typically "success" or "successful" in status
+                const isSuccess = (data.status === 'success' || data.Status === 'successful');
+                
                 if (!isSuccess) {
-                    throw new Error(data.msg || data.message || 'Provider returned failure status');
+                    const errorMsg = data.msg || data.message || 'Provider returned failure status';
+                    throw new Error(`Provider Error: ${errorMsg}`);
                 }
 
                 // Normalize PINs to array
@@ -277,11 +278,15 @@ app.post('/api/recharge', async (req, res) => {
                     data.pins = []; // Fallback
                 }
 
+                // C. Finalize Deduction on Success
+                await userRef.child('walletBalance').transaction(current => {
+                    return (Number(current) || 0) - cost;
+                });
+
             } catch (error) {
-                // C. Refund on Failure
-                console.error("RC Purchase Failed, Refunding:", error.message);
-                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) + cost);
-                throw error; // Re-throw to trigger failure response
+                // No refund needed since we didn't deduct yet
+                console.error("RC Purchase Failed (No Deduction):", error.message);
+                throw error; 
             }
 
         } else {
