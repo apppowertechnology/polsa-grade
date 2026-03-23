@@ -100,6 +100,19 @@ async function callApi(endpoint, payload) {
 
 // --- Endpoints ---
 
+// Check External Service Status
+app.get('/api/service-status', async (req, res) => {
+    try {
+        // Attempt to fetch user details to verify external connectivity
+        // We use 'user/' endpoint which typically returns profile info for Maskawa/Husmodata scripts
+        await callApi('user/', {}); 
+        res.json({ success: true, status: 'operational' });
+    } catch (error) {
+        console.error('Service Status Check Failed:', error.message);
+        res.json({ success: true, status: 'down', error: error.message });
+    }
+});
+
 // Get Wallet Balance
 app.get('/api/wallet/:userId', async (req, res) => {
     const { userId } = req.params;
@@ -118,18 +131,10 @@ app.get('/api/wallet/:userId', async (req, res) => {
 
 // Matches /api/recharge used in frontend Bills.js
 app.post('/api/recharge', async (req, res) => {
-    const { userId, service, amount, network, phone_number, plan, planName, quantity } = req.body;
+    const { userId, service, amount, network, phone_number, plan, planName, quantity, profit } = req.body;
 
     // Generate a local request ID for tracing logs
     const requestId = `req_${Date.now()}`;
-
-    // --- 1. Disable / Freeze Recharge Card Feature ---
-    if (service === 'recharge-card') {
-        return res.status(403).json({ 
-            success: false, 
-            message: 'Recharge card purchase is currently unavailable. Please use airtime or data services.' 
-        });
-    }
 
     // Enhanced validation for mandatory fields
     if (!userId || !service || !amount) {
@@ -147,98 +152,161 @@ app.post('/api/recharge', async (req, res) => {
     const cost = Number(amount);
     const networkId = getNetworkId(network);
 
+    // Declare refs outside try block to ensure they are accessible in catch for status updates
+    let userTxRef, adminTxRef;
+
     try {
         if (!db) {
             throw new Error(`Backend not connected to Firebase: ${initError || 'Check server logs.'}`);
         }
 
-        // 1. Validate User & Wallet Balance
-        const userRef = db.ref(`users/${userId}`);
-        const balanceSnap = await userRef.child('walletBalance').once('value');
-        const currentBalance = Number(balanceSnap.val()) || 0;
-
-        if (currentBalance < cost) {
-            return res.status(400).json({ success: false, message: 'Insufficient wallet balance.' });
-        }
-
-        // 2. Prepare Maskawa API Payload
-        let endpoint = '';
-        let payload = {};
-
-        if (service === 'airtime') {
-            endpoint = 'topup/';
-            payload = {
-                network: networkId,
-                amount: cost,
-                mobile_number: phone_number,
-                Ported_number: true,
-                airtime_type: 'VTU'
-            };
-        } else if (service === 'data') {
-            endpoint = 'data/';
-            payload = {
-                network: networkId,
-                plan: plan,
-                mobile_number: phone_number,
-                Ported_number: true
-            };
-        } else if (service === 'recharge-card') {
-            endpoint = 'epin/'; // Ensure endpoint is singular 'epin/' to prevent 404
-            payload = {
-                network: networkId,
-                amount: cost, 
-                quantity: quantity || 1
-            };
-        } else {
-            return res.status(400).json({ success: false, message: 'Invalid service type' });
-        }
-
-        // 3. Call Maskawa API
-        const data = await callApi(endpoint, payload);
-        console.log(`[${requestId}] API Response for ${service}:`, JSON.stringify(data));
-
-        // 4. Check API Success (Relaxed Logic)
-        // We treat it as success unless there is an explicit failure status.
-        // This prevents false errors when the API returns variations of success messages.
-        const isExplicitFailure = 
-            (data.Status && String(data.Status).toLowerCase().includes('fail')) ||
-            (data.status && String(data.status).toLowerCase().includes('fail')) ||
-            (data.success === 'false') ||
-            (data.success === false);
-
-        if (isExplicitFailure) {
-            throw new Error(data.message || data.error || 'Provider returned failure status');
-        }
-
-        // 5. Deduct Balance Atomically
-        await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
-
-        // 6. Log Transaction
-        // Fix: Ensure plan is never undefined. Use "Airtime" as fallback for airtime service.
+        // 1. Prepare Transaction Data & Log Pending State Immediately
         const safePlan = plan || (service === 'airtime' ? 'Airtime' : 'Standard');
-
-        // Construct details object explicitly to prevent undefined values
         const details = {
             network: network || 'N/A',
             phone: phone_number || 'N/A',
             plan: safePlan,
-            ...(planName && { planName }), // Only add if defined
-            ...(quantity && { quantity })  // Only add if defined
+            ...(planName && { planName }), 
+            ...(quantity && { quantity })  
         };
+
+        userTxRef = db.ref(`transactions/${userId}`).push();
+        adminTxRef = db.ref('payments').push();
+        const firebaseTxId = userTxRef.key;
+        const timestamp = new Date().toISOString();
 
         const txData = {
             type: 'purchase',
             feature: service,
             amount: cost,
-            status: 'Successful',
+            profit: Number(profit) || 0,
+            status: 'Pending',
             transactionId: requestId,
-            date: new Date().toISOString(),
+            date: timestamp,
+            timestamp: timestamp, // Required for admin panel sorting/display
             details: details
         };
-        
-        const txRef = await db.ref(`transactions/${userId}`).push(txData);
-        const firebaseTxId = txRef.key;
-        await db.ref('payments').push({ ...txData, userId, firebaseTxId }); // Admin log
+
+        // Write 'Pending' state to both User History and Admin Payments
+        await userTxRef.set(txData);
+        await adminTxRef.set({ ...txData, userId, firebaseTxId, email: 'Processing...' });
+
+        // 2. Validate User & Wallet Balance
+        const userRef = db.ref(`users/${userId}`);
+        const userSnap = await userRef.once('value');
+        const userVal = userSnap.val();
+
+        if (!userVal) throw new Error('User account not found.');
+
+        // Update Admin Log with correct User Details immediately
+        const currentBalance = Number(userVal.walletBalance) || 0;
+        const userEmail = userVal.email || userVal.fullName || 'Unknown';
+        // Fire and forget update to speed up response time slightly
+        adminTxRef.update({ email: userEmail, userName: userVal.fullName }).catch(console.error);
+
+        if (currentBalance < cost) {
+            throw new Error('Insufficient wallet balance.');
+        }
+
+        // 2. Prepare API Payload & Call
+        let endpoint = '';
+        let payload = {};
+        let data = {};
+
+        if (service === 'recharge-card') {
+            // --- RECHARGE CARD SPECIFIC FLOW (DALTECHSUB) ---
+            
+            // A. Deduct Wallet BEFORE API Call
+            const deductionResult = await userRef.child('walletBalance').transaction(current => {
+                const bal = Number(current) || 0;
+                if (bal < cost) return; // Abort transaction if insufficient
+                return bal - cost;
+            });
+
+            if (!deductionResult.committed) {
+                throw new Error('Insufficient wallet balance.');
+            }
+
+            // B. Call Daltechsub API
+            try {
+                const DALTECH_URL = 'https://daltechsubapi.com.ng/api/rechargepin/';
+                const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
+                const ref = `EPIN_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+                const rcPayload = {
+                    network: String(networkId),
+                    quantity: String(quantity || 1),
+                    plan: String(cost), // Daltech expects amount as 'plan' or denomination
+                    businessname: "Prime Biller",
+                    ref: ref
+                };
+
+                console.log(`Calling Daltech RC: ${JSON.stringify(rcPayload)}`);
+                const response = await axios.post(DALTECH_URL, rcPayload, {
+                    headers: {
+                        'Authorization': `Token ${DALTECH_KEY}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                data = response.data;
+                
+                // Validate Success
+                const isSuccess = data.status === 'success' || data.Status === 'successful';
+                if (!isSuccess) {
+                    throw new Error(data.msg || data.message || 'Provider returned failure status');
+                }
+
+                // Normalize PINs to array
+                // Daltech returns "1234, 5678" string
+                let rawPins = data.pin || data.pins;
+                if (typeof rawPins === 'string') {
+                    data.pins = rawPins.includes(',') ? rawPins.split(',') : [rawPins];
+                } else if (Array.isArray(rawPins)) {
+                    data.pins = rawPins;
+                } else {
+                    data.pins = []; // Fallback
+                }
+
+            } catch (error) {
+                // C. Refund on Failure
+                console.error("RC Purchase Failed, Refunding:", error.message);
+                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) + cost);
+                throw error; // Re-throw to trigger failure response
+            }
+
+        } else {
+            // --- STANDARD FLOW (Airtime/Data) ---
+            if (service === 'airtime') {
+                endpoint = 'topup/';
+                payload = { network: networkId, amount: cost, mobile_number: phone_number, Ported_number: true, airtime_type: 'VTU' };
+            } else if (service === 'data') {
+                endpoint = 'data/';
+                payload = { network: networkId, plan: plan, mobile_number: phone_number, Ported_number: true };
+            } else {
+                return res.status(400).json({ success: false, message: 'Invalid service type' });
+            }
+
+            // Call Maskawa API
+            data = await callApi(endpoint, payload);
+
+            // Check Success
+            const isExplicitFailure = (data.Status && String(data.Status).toLowerCase().includes('fail')) || (data.status && String(data.status).toLowerCase().includes('fail')) || (data.success === 'false') || (data.success === false);
+            if (isExplicitFailure) {
+                throw new Error(data.message || data.error || 'Provider returned failure status');
+            }
+
+            // Deduct Balance (Standard Flow)
+            await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
+        }
+
+        // 6. Update to Successful & Record Provider Response
+        const successUpdate = { 
+            status: 'Successful',
+            providerResponse: data
+        };
+        await userTxRef.update(successUpdate);
+        await adminTxRef.update(successUpdate);
 
         // 7. Return Success
         const pins = data.pins || (data.pin ? [data.pin] : (data.token ? [data.token] : []));
@@ -266,6 +334,18 @@ app.post('/api/recharge', async (req, res) => {
 
     } catch (error) {
         console.error('Recharge Error:', error.response?.data || error.message);
+        
+        // Update logs to Failed
+        if (userTxRef && adminTxRef) {
+            const failUpdate = { 
+                status: 'Failed', 
+                reason: error.message,
+                providerResponse: error.response?.data || null
+            };
+            userTxRef.update(failUpdate).catch(console.error);
+            adminTxRef.update(failUpdate).catch(console.error);
+        }
+
         res.status(500).json({ success: false, message: error.response?.data?.message || error.message || 'Transaction failed' });
     }
 });
