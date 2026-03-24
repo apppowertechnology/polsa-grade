@@ -404,7 +404,12 @@ app.post('/api/recharge', async (req, res) => {
         const errData = error.response?.data || {};
         const msg = (typeof errData === 'string' ? errData : (errData.message || errData.msg || errData.error || errData.detail)) || error.message || 'Transaction failed';
         
-        console.error('Recharge Error:', errData || error.message);
+        console.error('Recharge Endpoint Error:', {
+            requestId: requestId,
+            errorMessage: error.message,
+            providerResponse: errData,
+            stack: error.stack
+        });
         
         // Update logs to Failed
         if (userTxRef && adminTxRef) {
