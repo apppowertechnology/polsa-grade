@@ -81,17 +81,32 @@ async function callApi(endpoint, payload) {
             headers: {
                 'Authorization': `Token ${VTU_API_KEY}`,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 60000 // 60s timeout
         });
         return response.data;
     } catch (error) {
-        // Extract detailed error from provider if available
+        // Log detailed error for debugging
+        console.error(`API Request Failed [${url}]:`, JSON.stringify({
+            message: error.message,
+            code: error.code,
+            status: error.response?.status,
+            responseData: error.response?.data,
+            payload: payload
+        }, null, 2));
+
+        if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+            throw new Error("Request timeout. Please try again.");
+        }
+        if (!error.response) {
+            throw new Error("Recharge service temporarily unavailable. Please try again later.");
+        }
+
         let detailedMsg = error.message;
         if (error.response && error.response.data) {
             const data = error.response.data;
             // Check for common error fields from Django/DRF APIs (detail, message, error, or object keys)
             detailedMsg = data.detail || data.message || data.error || (typeof data === 'object' ? JSON.stringify(data) : data);
-            console.error(`API Error Response: ${JSON.stringify(data)}`);
         }
         error.message = `Provider Error: ${detailedMsg}`;
         throw error;
@@ -273,7 +288,8 @@ app.post('/api/recharge', async (req, res) => {
                     headers: {
                         'Authorization': `Token ${DALTECH_KEY}`,
                         'Content-Type': 'application/json'
-                    }
+                    },
+                    timeout: 60000 // 60s timeout
                 });
 
                 data = response.data;
@@ -310,8 +326,19 @@ app.post('/api/recharge', async (req, res) => {
 
             } catch (error) {
                 // No refund needed since we didn't deduct yet
-                console.error("RC Purchase Failed (No Deduction):", error.message);
-                throw error; 
+                console.error("RC Purchase Failed (No Deduction):", {
+                    message: error.message,
+                    response: error.response?.data
+                });
+                
+                if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+                    throw new Error("Request timeout. Please try again.");
+                }
+                if (!error.response) {
+                    throw new Error("Recharge service temporarily unavailable. Please try again later.");
+                }
+                
+                throw error;
             }
 
         } else {
