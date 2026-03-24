@@ -304,7 +304,8 @@ app.post('/api/recharge', async (req, res) => {
                 const isSuccess = (data.status === 'success' || data.Status === 'successful');
                 
                 if (!isSuccess) {
-                    const errorMsg = data.msg || data.message || data.error || JSON.stringify(data);
+                    // Capture all possible error fields
+                    const errorMsg = data.msg || data.message || data.error || data.detail || JSON.stringify(data);
                     throw new Error(`Provider Error: ${errorMsg}`);
                 }
 
