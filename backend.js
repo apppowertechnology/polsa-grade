@@ -1,4 +1,4 @@
-/**
+/*
  * Backend Server for POLSA GRADE
  * Handles secure API calls to MaskawaSub, Wallet management, and Logging.
  */
@@ -239,26 +239,25 @@ app.post('/api/recharge', async (req, res) => {
                 const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
                 const ref = `EPIN_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
-                // Lookup Plan ID: Strictly from DB Configuration
-                const plansSnap = await db.ref('settings/recharge_card/plans').once('value');
-                const dbPlans = plansSnap.val();
+                // Strict Predefined Mapping (Provider: Daltech)
+                // MTN=1, GLO=2, AIRTEL=3, 9MOBILE=4
+                const RC_PLAN_MAPPING = {
+                    '1': { '100': '1', '200': '2', '500': '3', '1000': '4' },       // MTN
+                    '2': { '100': '145', '200': '146', '500': '147', '1000': '148' }, // GLO
+                    '3': { '100': '153', '200': '154', '500': '155', '1000': '156' }, // AIRTEL
+                    '4': { '100': '149', '200': '150', '500': '151', '1000': '152' }  // 9MOBILE
+                };
 
-                if (!dbPlans) {
-                    throw new Error('Recharge card system is not configured. Please contact support.');
-                }
-
-                const networkPlans = dbPlans[String(networkId)];
+                const networkPlans = RC_PLAN_MAPPING[String(networkId)];
                 if (!networkPlans) {
-                    throw new Error(`No recharge plans configured for Network ID ${networkId}.`);
+                    throw new Error(`Network ID ${networkId} is not supported for recharge cards.`);
                 }
 
                 // Direct mapping: Amount -> Plan ID
                 const planId = networkPlans[String(amount)];
 
                 if (!planId) {
-                    // Provide helpful error with available options
-                    const available = Object.keys(networkPlans).map(amt => `₦${amt}`).join(', ');
-                    throw new Error(`Invalid amount (₦${amount}). Available: ${available}`);
+                    throw new Error(`Invalid amount (₦${amount}). Available options: ₦100, ₦200, ₦500, ₦1000`);
                 }
 
                 const rcPayload = {
