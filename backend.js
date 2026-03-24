@@ -177,11 +177,12 @@ app.post('/api/recharge', async (req, res) => {
 
         // Calculate correct cost for recharge cards (considering quantity and discount)
         if (service === 'recharge-card') {
+            const qty = Math.max(1, parseInt(quantity) || 1); // Ensure positive integer
             const discountSnap = await db.ref('settings/recharge_card/enable_discount').once('value');
             if (discountSnap.val()) {
                 cost = Math.max(0, cost - 1);
             }
-            cost = cost * (Number(quantity) || 1);
+            cost = cost * qty;
         }
 
         // 1. Prepare Transaction Data & Log Pending State Immediately
