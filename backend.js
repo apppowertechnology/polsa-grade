@@ -1,4 +1,4 @@
-/*
+*
  * Backend Server for POLSA GRADE
  * Handles secure API calls to MaskawaSub, Wallet management, and Logging.
  */
@@ -279,12 +279,16 @@ app.post('/api/recharge', async (req, res) => {
                 data = response.data;
                 console.log("Daltech Response:", JSON.stringify(data));
                 
+                if (typeof data !== 'object' || data === null) {
+                    throw new Error(`Provider returned an invalid, non-JSON response.`);
+                }
+
                 // Validate Success
                 // Daltech success is typically "success" or "successful" in status
                 const isSuccess = (data.status === 'success' || data.Status === 'successful');
                 
                 if (!isSuccess) {
-                    const errorMsg = data.msg || data.message || 'Provider returned failure status';
+                    const errorMsg = data.msg || data.message || data.error || JSON.stringify(data);
                     throw new Error(`Provider Error: ${errorMsg}`);
                 }
 
