@@ -343,14 +343,55 @@ app.post('/api/recharge', async (req, res) => {
                 throw error;
             }
 
+        } else if (service === 'data') {
+            // --- DATA-SPECIFIC FLOW (DALTECHSUB) ---
+            try {
+                const DALTECH_DATA_URL = 'https://daltechsubapi.com.ng/api/data/';
+                const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
+
+                const dataPayload = {
+                    network: String(networkId),
+                    phone: phone_number,
+                    plan: plan, // This is the apiPlanId from the frontend
+                    ref: requestId,
+                    ported_number: true
+                };
+
+                console.log(`Calling Daltech Data: ${JSON.stringify(dataPayload)}`);
+                const response = await axios.post(DALTECH_DATA_URL, dataPayload, {
+                    headers: {
+                        'Authorization': `Token ${DALTECH_KEY}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 60000
+                });
+
+                data = response.data;
+                console.log("Daltech Data Response:", JSON.stringify(data));
+
+                if (typeof data !== 'object' || data === null) {
+                    throw new Error(`Provider returned an invalid, non-JSON response.`);
+                }
+
+                const isSuccess = (data.status === 'success' || data.Status === 'successful');
+                if (!isSuccess) {
+                    const errorMsg = data.msg || data.message || data.error || data.detail || JSON.stringify(data);
+                    throw new Error(`Provider Error: ${errorMsg}`);
+                }
+
+                // Deduct Balance on Success
+                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
+            } catch (error) {
+                console.error("Data Purchase Failed (No Deduction):", { message: error.message, response: error.response?.data });
+                if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) { throw new Error("Request timeout. Please try again."); }
+                throw error;
+            }
+
         } else {
             // --- STANDARD FLOW (Airtime/Data) ---
             if (service === 'airtime') {
                 endpoint = 'topup/';
                 payload = { network: networkId, amount: cost, mobile_number: phone_number, Ported_number: true, airtime_type: 'VTU' };
-            } else if (service === 'data') {
-                endpoint = 'data/';
-                payload = { network: networkId, plan: plan, mobile_number: phone_number, Ported_number: true };
             } else {
                 return res.status(400).json({ success: false, message: 'Invalid service type' });
             }
