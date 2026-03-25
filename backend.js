@@ -59,6 +59,14 @@ try {
 const VTU_API_KEY = process.env.VTU_API_KEY;
 const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
 
+// --- Network Prefix Mapping for Validation ---
+const NETWORK_PREFIXES = {
+    '1': ['0803', '0806', '0703', '0903', '0906', '0810', '0813', '0814', '0816', '0706', '0913', '0916', '07025', '07026', '0704'], // MTN
+    '2': ['0805', '0807', '0705', '0815', '0811', '0905', '0915'], // GLO
+    '3': ['0802', '0808', '0708', '0812', '0701', '0902', '0901', '0904', '0907', '0912'], // Airtel
+    '4': ['0809', '0818', '0817', '0909', '0908'] // 9mobile
+};
+
 // --- Helper Functions ---
 
 const getNetworkId = (networkStr) => {
@@ -70,6 +78,14 @@ const getNetworkId = (networkStr) => {
         '9mobile': 4, '4': 4
     };
     return map[String(networkStr).toLowerCase()] || networkStr;
+};
+
+const validateNetworkPrefix = (phone, networkId) => {
+    let cleanPhone = phone.replace(/\D/g, '');
+    if (cleanPhone.startsWith('234')) cleanPhone = '0' + cleanPhone.substring(3);
+    const prefixes = NETWORK_PREFIXES[String(networkId)];
+    if (!prefixes) return true; // Skip if network mapping unknown
+    return prefixes.some(p => cleanPhone.startsWith(p));
 };
 
 // --- API Helper ---
@@ -151,21 +167,52 @@ app.post('/api/recharge', async (req, res) => {
     // Generate a local request ID for tracing logs
     const requestId = `req_${Date.now()}`;
 
+    const networkId = getNetworkId(network);
+    const qty = Math.max(1, parseInt(quantity) || 1);
+    let pinCharge = 0;
+    let backendProfit = Number(profit) || 0;
+    let cost = Number(amount);
+
     // Enhanced validation for mandatory fields
-    if (!userId || !service || !amount) {
-        return res.status(400).json({ success: false, message: 'Missing required fields: userId, service, and amount are mandatory.' });
+    if (!userId || !service || !amount || !network || !phone_number) {
+        return res.status(400).json({ success: false, message: 'Missing required fields: userId, service, amount, network, and phone_number are mandatory.' });
+    }
+
+    // --- Charge Calculation (Backend Enforced) ---
+    if (service === 'recharge-card') {
+        const discountSnap = await db.ref('settings/recharge_card/enable_discount').once('value');
+        const isDiscountEnabled = !!discountSnap.val();
+        
+        // Re-calculate cost from base unit price
+        let unitPrice = Number(amount);
+        if (isDiscountEnabled) {
+            unitPrice = Math.max(0, unitPrice - 1);
+        }
+        
+        const baseCost = unitPrice * qty;
+        // Apply ₦5 charge for each additional PIN (above 1)
+        pinCharge = (qty > 1) ? (qty - 1) * 5 : 0;
+        cost = baseCost + pinCharge;
+
+        // Securely re-calculate profit (Provider discount ₦2, User discount ₦1 or ₦0)
+        const providerDiscount = 2;
+        const userDiscount = isDiscountEnabled ? 1 : 0;
+        backendProfit = ((providerDiscount - userDiscount) * qty) + pinCharge;
+    }
+
+    // Strict Network Validation
+    if (!validateNetworkPrefix(phone_number, networkId)) {
+        const netName = { '1': 'MTN', '2': 'GLO', '3': 'Airtel', '4': '9mobile' }[String(networkId)] || 'selected';
+        return res.status(400).json({ success: false, message: `Please enter a valid ${netName} number` });
     }
 
     // Service-specific field validation
-    if (service === 'data' && (!plan || !network || !phone_number)) {
-        return res.status(400).json({ success: false, message: 'For Data purchases, you must provide a plan, network, and phone number.' });
+    if (service === 'data' && !plan) {
+        return res.status(400).json({ success: false, message: 'For Data purchases, a plan ID is required.' });
     }
-    if (service === 'airtime' && (!network || !phone_number || phone_number.length < 10)) {
-        return res.status(400).json({ success: false, message: 'For Airtime purchases, you must provide a valid network and phone number.' });
+    if (service === 'airtime' && phone_number.length < 10) {
+        return res.status(400).json({ success: false, message: 'Invalid phone number length for airtime purchase.' });
     }
-
-    let cost = Number(amount);
-    const networkId = getNetworkId(network);
 
     // Declare refs outside try block to ensure they are accessible in catch for status updates
     let userTxRef, adminTxRef;
@@ -203,8 +250,10 @@ app.post('/api/recharge', async (req, res) => {
         const txData = {
             type: 'purchase',
             feature: service,
-            amount: cost,
-            profit: Number(profit) || 0,
+            amount: cost, // Deducted from wallet
+            originalAmount: Number(amount) * qty,
+            charge: pinCharge,
+            profit: backendProfit,
             status: 'Pending',
             transactionId: requestId,
             date: timestamp,
