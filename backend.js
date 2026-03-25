@@ -427,6 +427,10 @@ app.post('/api/recharge', async (req, res) => {
                     const errorMsg = data.msg || data.message || data.error || data.detail || JSON.stringify(data);
                     throw new Error(`Provider Error: ${errorMsg}`);
                 }
+            
+            if (!dataPayload.plan) {
+                 throw new Error(`Invalid plan ID: ${plan}. Please contact support.`);
+            }
 
                 // Deduct Balance on Success
                 await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
