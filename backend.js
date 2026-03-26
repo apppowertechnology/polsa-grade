@@ -34,9 +34,9 @@ try {
             credential: admin.credential.cert({
                 projectId: process.env.FIREBASE_PROJECT_ID,
                 clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-                privateKey: privateKey
+                privateKey: privateKey // Reverted
             }),
-            databaseURL: process.env.FIREBASE_DATABASE_URL
+            databaseURL: process.env.FIREBASE_DATABASE_URL // Reverted
         });
     }
     
@@ -201,8 +201,9 @@ app.post('/api/recharge', async (req, res) => {
     let cost = Number(amount);
 
     // Enhanced validation for mandatory fields
-    if (!userId || !service || !amount || !network || !phone_number) {
-        return res.status(400).json({ success: false, message: 'Missing required fields: userId, service, amount, network, and phone_number are mandatory.' });
+    const isRecharge = service === 'recharge-card';
+    if (!userId || !service || !amount || !network || (!isRecharge && !phone_number)) {
+        return res.status(400).json({ success: false, message: `Missing required fields: userId, service, amount, network${isRecharge ? '' : ' and phone_number'} are mandatory.` });
     }
 
     // --- Charge Calculation (Backend Enforced) ---
@@ -228,7 +229,7 @@ app.post('/api/recharge', async (req, res) => {
     }
 
     // Strict Network Validation
-    if (!validateNetworkPrefix(phone_number, networkId)) {
+    if (!isRecharge && !validateNetworkPrefix(phone_number, networkId)) {
         const netName = { '1': 'MTN', '2': 'GLO', '3': 'Airtel', '4': '9mobile' }[String(networkId)] || 'selected';
         return res.status(400).json({ success: false, message: `Please enter a valid ${netName} number` });
     }
@@ -359,7 +360,7 @@ app.post('/api/recharge', async (req, res) => {
                 // Direct mapping: Amount -> Plan ID
                 const planId = networkPlans[String(amount)];
 
-                if (!planId) {
+                if (!planId) { // Reverted
                     throw new Error(`Invalid amount (₦${amount}). Available options: ₦100, ₦200, ₦500, ₦1000`);
                 }
 
@@ -367,7 +368,7 @@ app.post('/api/recharge', async (req, res) => {
                     network: String(networkId),
                     quantity: String(quantity || 1),
                     plan: planId, // Send the mapped Plan ID (e.g., '5') instead of '100'
-                    businessname: "Prime Biller",
+                    businessname: "POLSA GRADE", // Reverted
                     ref: ref
                 };
 
