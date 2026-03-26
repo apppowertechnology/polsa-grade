@@ -1,5 +1,5 @@
 /*
- * Backend Server for POLSA GRADE
+ * Backend Server for BILLGRADE
  * Handles secure API calls to MaskawaSub, Wallet management, and Logging.
  */
 
