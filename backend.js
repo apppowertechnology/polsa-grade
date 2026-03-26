@@ -7,7 +7,6 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
-const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
@@ -34,9 +33,9 @@ try {
             credential: admin.credential.cert({
                 projectId: process.env.FIREBASE_PROJECT_ID,
                 clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-                privateKey: privateKey // Reverted
+                privateKey: privateKey
             }),
-            databaseURL: process.env.FIREBASE_DATABASE_URL // Reverted
+            databaseURL: process.env.FIREBASE_DATABASE_URL
         });
     }
     
@@ -60,14 +59,6 @@ try {
 const VTU_API_KEY = process.env.VTU_API_KEY;
 const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
 
-// --- Network Prefix Mapping for Validation ---
-const NETWORK_PREFIXES = {
-    '1': ['0803', '0806', '0703', '0903', '0906', '0810', '0813', '0814', '0816', '0706', '0913', '0916', '07025', '07026', '0704'], // MTN
-    '2': ['0805', '0807', '0705', '0815', '0811', '0905', '0915'], // GLO
-    '3': ['0802', '0808', '0708', '0812', '0701', '0902', '0901', '0904', '0907', '0912'], // Airtel
-    '4': ['0809', '0818', '0817', '0909', '0908'] // 9mobile
-};
-
 // --- Helper Functions ---
 
 const getNetworkId = (networkStr) => {
@@ -79,40 +70,6 @@ const getNetworkId = (networkStr) => {
         '9mobile': 4, '4': 4
     };
     return map[String(networkStr).toLowerCase()] || networkStr;
-};
-
-const validateNetworkPrefix = (phone, networkId) => {
-    let cleanPhone = phone.replace(/\D/g, '');
-    if (cleanPhone.startsWith('234')) cleanPhone = '0' + cleanPhone.substring(3);
-    const prefixes = NETWORK_PREFIXES[String(networkId)];
-    if (!prefixes) return true; // Skip if network mapping unknown
-    return prefixes.some(p => cleanPhone.startsWith(p));
-};
-
-// --- Valid Data Plan Source of Truth ---
-const VALID_DATA_PLANS = {
-    '1': ['6', '7', '8', '9', '10', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '39', '40', '41', '42', '43', '44', '45', '46', '47', '129', '130', '131', '132', '133', '134', '135', '136', '137', '139', '164', '165', '166'], // MTN
-    '2': ['96', '97', '98', '99', '100', '101', '102', '103', '104', '105', '106', '107', '108', '109', '110', '111', '112', '113', '114', '115', '116', '117', '118', '119', '120', '121', '122', '140', '141', '142', '143', '144', '148', '149', '150', '151', '152', '153', '154', '155', '156'], // GLO
-    '3': ['48', '50', '51', '52', '53', '54', '56', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '70', '71', '72', '73', '74', '75', '76', '78', '79', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '90', '91', '92', '93', '94', '95', '138', '146', '160', '161', '162', '163'], // Airtel
-    '4': ['123', '124', '125', '126', '127', '128'] // 9mobile
-};
-
-/**
- * Pushes a notification to the admin dashboard.
- */
-const sendAdminAlert = async (title, message, details = {}) => {
-    if (!db) return;
-    try {
-        await db.ref('admin_alerts').push({
-            title,
-            message,
-            details,
-            timestamp: admin.database.ServerValue.TIMESTAMP,
-            isRead: false
-        });
-    } catch (err) {
-        console.error("Admin Alert failed:", err.message);
-    }
 };
 
 // --- API Helper ---
@@ -194,64 +151,21 @@ app.post('/api/recharge', async (req, res) => {
     // Generate a local request ID for tracing logs
     const requestId = `req_${Date.now()}`;
 
-    const networkId = getNetworkId(network);
-    const qty = Math.max(1, parseInt(quantity) || 1);
-    let pinCharge = 0;
-    let backendProfit = Number(profit) || 0;
-    let cost = Number(amount);
-
     // Enhanced validation for mandatory fields
-    const isRecharge = service === 'recharge-card';
-    if (!userId || !service || !amount || !network || (!isRecharge && !phone_number)) {
-        return res.status(400).json({ success: false, message: `Missing required fields: userId, service, amount, network${isRecharge ? '' : ' and phone_number'} are mandatory.` });
-    }
-
-    // --- Charge Calculation (Backend Enforced) ---
-    if (service === 'recharge-card') {
-        const discountSnap = await db.ref('settings/recharge_card/enable_discount').once('value');
-        const isDiscountEnabled = !!discountSnap.val();
-        
-        // Re-calculate cost from base unit price
-        let unitPrice = Number(amount);
-        if (isDiscountEnabled) {
-            unitPrice = Math.max(0, unitPrice - 1);
-        }
-        
-        const baseCost = unitPrice * qty;
-        // Apply ₦5 charge for each additional PIN (above 1)
-        pinCharge = (qty > 1) ? (qty - 1) * 5 : 0;
-        cost = baseCost + pinCharge;
-
-        // Securely re-calculate profit (Provider discount ₦2, User discount ₦1 or ₦0)
-        const providerDiscount = 2;
-        const userDiscount = isDiscountEnabled ? 1 : 0;
-        backendProfit = ((providerDiscount - userDiscount) * qty) + pinCharge;
-    }
-
-    // Strict Network Validation
-    if (!isRecharge && !validateNetworkPrefix(phone_number, networkId)) {
-        const netName = { '1': 'MTN', '2': 'GLO', '3': 'Airtel', '4': '9mobile' }[String(networkId)] || 'selected';
-        return res.status(400).json({ success: false, message: `Please enter a valid ${netName} number` });
+    if (!userId || !service || !amount) {
+        return res.status(400).json({ success: false, message: 'Missing required fields: userId, service, and amount are mandatory.' });
     }
 
     // Service-specific field validation
-    if (service === 'data' && !plan) {
-        return res.status(400).json({ success: false, message: 'For Data purchases, a plan ID is required.' });
+    if (service === 'data' && (!plan || !network || !phone_number)) {
+        return res.status(400).json({ success: false, message: 'For Data purchases, you must provide a plan, network, and phone number.' });
     }
-    if (service === 'airtime' && phone_number.length < 10) {
-        return res.status(400).json({ success: false, message: 'Invalid phone number length for airtime purchase.' });
+    if (service === 'airtime' && (!network || !phone_number || phone_number.length < 10)) {
+        return res.status(400).json({ success: false, message: 'For Airtime purchases, you must provide a valid network and phone number.' });
     }
 
-    // --- Strict Data Plan ID Validation ---
-    if (service === 'data') {
-        const cleanPlanId = String(plan).replace('plan_', '');
-        const validPlansForNetwork = VALID_DATA_PLANS[String(networkId)];
-        
-        if (!validPlansForNetwork || !validPlansForNetwork.includes(cleanPlanId)) {
-            await sendAdminAlert('Security: Invalid Plan Attempt', `User ${userId} attempted to buy plan ID: ${plan} on network ${networkId}. Transaction blocked locally.`, { userId, plan, networkId, phone_number });
-            return res.status(400).json({ success: false, message: 'Invalid plan selected. Please choose a valid data plan.' });
-        }
-    }
+    let cost = Number(amount);
+    const networkId = getNetworkId(network);
 
     // Declare refs outside try block to ensure they are accessible in catch for status updates
     let userTxRef, adminTxRef;
@@ -289,10 +203,8 @@ app.post('/api/recharge', async (req, res) => {
         const txData = {
             type: 'purchase',
             feature: service,
-            amount: cost, // Deducted from wallet
-            originalAmount: Number(amount) * qty,
-            charge: pinCharge,
-            profit: backendProfit,
+            amount: cost,
+            profit: Number(profit) || 0,
             status: 'Pending',
             transactionId: requestId,
             date: timestamp,
@@ -360,7 +272,7 @@ app.post('/api/recharge', async (req, res) => {
                 // Direct mapping: Amount -> Plan ID
                 const planId = networkPlans[String(amount)];
 
-                if (!planId) { // Reverted
+                if (!planId) {
                     throw new Error(`Invalid amount (₦${amount}). Available options: ₦100, ₦200, ₦500, ₦1000`);
                 }
 
@@ -368,7 +280,7 @@ app.post('/api/recharge', async (req, res) => {
                     network: String(networkId),
                     quantity: String(quantity || 1),
                     plan: planId, // Send the mapped Plan ID (e.g., '5') instead of '100'
-                    businessname: "POLSA GRADE", // Reverted
+                    businessname: "Prime Biller",
                     ref: ref
                 };
 
@@ -431,59 +343,14 @@ app.post('/api/recharge', async (req, res) => {
                 throw error;
             }
 
-        } else if (service === 'data') {
-            // --- DATA-SPECIFIC FLOW (DALTECHSUB) ---
-            try {
-                const DALTECH_DATA_URL = 'https://daltechsubapi.com.ng/api/data/';
-                const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
-
-                const dataPayload = {
-                    network: String(networkId),
-                    phone: phone_number,
-                    plan: String(plan).replace('plan_', ''), // Sanitize plan ID for the provider
-                    ref: requestId,
-                    ported_number: true
-                };
-
-                console.log(`Calling Daltech Data: ${JSON.stringify(dataPayload)}`);
-                const response = await axios.post(DALTECH_DATA_URL, dataPayload, {
-                    headers: {
-                        'Authorization': `Token ${DALTECH_KEY}`,
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 60000
-                });
-
-                data = response.data;
-                console.log("Daltech Data Response:", JSON.stringify(data));
-
-                if (typeof data !== 'object' || data === null) {
-                    throw new Error(`Provider returned an invalid, non-JSON response.`);
-                }
-
-                const isSuccess = (data.status === 'success' || data.Status === 'successful');
-                if (!isSuccess) {
-                    const errorMsg = data.msg || data.message || data.error || data.detail || JSON.stringify(data);
-                    throw new Error(`Provider Error: ${errorMsg}`);
-                }
-            
-            if (!dataPayload.plan) {
-                 throw new Error(`Invalid plan ID: ${plan}. Please contact support.`);
-            }
-
-                // Deduct Balance on Success
-                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
-            } catch (error) {
-                console.error("Data Purchase Failed (No Deduction):", { message: error.message, response: error.response?.data });
-                if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) { throw new Error("Request timeout. Please try again."); }
-                throw error;
-            }
-
         } else {
             // --- STANDARD FLOW (Airtime/Data) ---
             if (service === 'airtime') {
                 endpoint = 'topup/';
                 payload = { network: networkId, amount: cost, mobile_number: phone_number, Ported_number: true, airtime_type: 'VTU' };
+            } else if (service === 'data') {
+                endpoint = 'data/';
+                payload = { network: networkId, plan: plan, mobile_number: phone_number, Ported_number: true };
             } else {
                 return res.status(400).json({ success: false, message: 'Invalid service type' });
             }
@@ -544,11 +411,6 @@ app.post('/api/recharge', async (req, res) => {
             providerResponse: errData,
             stack: error.stack
         });
-
-        // Notify Admin of Provider Rejection
-        if (msg.toLowerCase().includes('invalid plan') || msg.toLowerCase().includes('plan_id')) {
-            await sendAdminAlert('Provider Rejected Plan ID', `DaltechSub rejected plan ID ${plan}. Response: ${msg}`, { plan, userId, networkId, errData });
-        }
         
         // Update logs to Failed
         if (userTxRef && adminTxRef) {
@@ -648,78 +510,6 @@ app.post('/api/settings/rc-plans', async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 });
-
-// --- Automated Data Plan Sync ---
-
-const calculateSellingPrice = (apiCost) => {
-    if (apiCost < 200) return apiCost + 35;
-    if (apiCost < 500) return apiCost + 80;
-    if (apiCost < 1000) return apiCost + 100;
-    if (apiCost < 2000) return apiCost + 150;
-    if (apiCost < 3000) return apiCost + 200;
-    if (apiCost < 5000) return apiCost + 250;
-    if (apiCost < 10000) return apiCost + 300;
-    return apiCost + 500;
-};
-
-async function runDataPlanSync() {
-    console.log("[Schedule] Starting automated data plan sync...");
-    const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
-    const DATA_PLANS_URL = 'https://daltechsubapi.com.ng/api/data/'; 
-
-    try {
-        if (!db) throw new Error("Firebase not initialized");
-
-        // 1. Fetch current plans from Firebase to preserve custom pricing
-        const existingSnap = await db.ref('services/data_plans').once('value');
-        const existingPlans = existingSnap.val() || {};
-
-        // 2. Fetch latest plans from DaltechSub
-        const response = await axios.get(DATA_PLANS_URL, {
-            headers: { 'Authorization': `Token ${DALTECH_KEY}` }
-        });
-
-        let plans = response.data;
-        if (plans.data && Array.isArray(plans.data)) plans = plans.data;
-
-        if (!Array.isArray(plans)) throw new Error("Invalid provider response format");
-
-        const updates = {};
-        const networkMap = { '1': 'mtn', '2': 'glo', '3': 'airtel', '4': '9mobile' };
-
-        plans.forEach(plan => {
-            const networkId = String(plan.network);
-            const netKey = networkMap[networkId];
-            
-            if (netKey) {
-                const planKey = `plan_${plan.id}`;
-                const existingPlan = existingPlans[netKey]?.[planKey];
-                const apiCost = Number(plan.amount || plan.price || 0);
-
-                // Use existing price if available, else calculate default
-                const sellingPrice = (existingPlan && existingPlan.price) ? existingPlan.price : calculateSellingPrice(apiCost);
-
-                updates[`services/data_plans/${netKey}/${planKey}`] = {
-                    name: plan.name || plan.plan_name || 'Unnamed Plan',
-                    apiCost: apiCost,
-                    validity: plan.month_validate || plan.validity || "30 days",
-                    apiPlanId: plan.id,
-                    price: sellingPrice
-                };
-            }
-        });
-
-        if (Object.keys(updates).length > 0) {
-            await db.ref().update(updates);
-            console.log(`[Schedule] Successfully synced ${Object.keys(updates).length} data plans.`);
-        }
-    } catch (error) {
-        console.error("[Schedule] Automated Sync Error:", error.message);
-    }
-}
-
-// Schedule to run every day at 3:00 AM
-cron.schedule('0 3 * * *', () => runDataPlanSync());
 
 // --- 404 Handler for Unknown Routes ---
 app.use((req, res) => {
