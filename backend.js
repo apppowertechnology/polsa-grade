@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
-require('dotenv').config();
+require('dotenv').config(); // Ensure dotenv is loaded early
 
 const app = express();
 app.use(cors());
@@ -19,8 +19,9 @@ app.get('/', (req, res) => {
 });
 
 // --- Firebase Initialization ---
-let db;
-let initError = null;
+let db; // Firebase Realtime Database instance
+let firebaseInitialized = false; // Flag to track successful Firebase initialization
+let firebaseInitError = null; // Stores any error message from Firebase init
 
 try {
     // Initialize Firebase Admin SDK
@@ -28,6 +29,20 @@ try {
         const privateKey = process.env.FIREBASE_PRIVATE_KEY 
             ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim() 
             : undefined;
+
+        // Validate essential Firebase environment variables
+        if (!process.env.FIREBASE_PROJECT_ID) {
+            throw new Error("FIREBASE_PROJECT_ID is not set in environment variables.");
+        }
+        if (!process.env.FIREBASE_CLIENT_EMAIL) {
+            throw new Error("FIREBASE_CLIENT_EMAIL is not set in environment variables.");
+        }
+        if (!privateKey) {
+            throw new Error("FIREBASE_PRIVATE_KEY is not set or is empty in environment variables.");
+        }
+        if (!process.env.FIREBASE_DATABASE_URL) {
+            throw new Error("FIREBASE_DATABASE_URL is not set in environment variables.");
+        }
 
         admin.initializeApp({
             credential: admin.credential.cert({
@@ -38,26 +53,47 @@ try {
             databaseURL: process.env.FIREBASE_DATABASE_URL
         });
     }
-    
     db = admin.database();
-    console.log("Firebase Initialized ✅");
+    firebaseInitialized = true;
+    console.log("Firebase Admin SDK Initialized ✅");
 
     // Test Database Connection
-    db.ref('test_connection').set({ connected: true, timestamp: Date.now() })
-        .then(snapshot => {
-            console.log("Database connection test successful ✅");
+    // This writes a timestamp to a specific path to confirm connectivity
+    db.ref('backend_status/last_connected').set(admin.database.ServerValue.TIMESTAMP)
+        .then(() => {
+            console.log("Firebase Realtime Database connection test successful ✅");
         })
         .catch(err => {
-            console.error("Database connection test failed:", err.message);
+            console.error("Firebase Realtime Database connection test failed: ❌", err.message);
+            firebaseInitError = `Firebase DB connection failed: ${err.message}`;
+            firebaseInitialized = false; // Mark as failed if DB connection fails
         });
 
 } catch (error) {
-    console.error("Firebase Initialization Failed:", error.message);
-    initError = error.message;
+    console.error("Firebase Initialization Failed: ❌", error.message);
+    firebaseInitError = `Firebase initialization failed: ${error.message}`;
+    firebaseInitialized = false;
 }
 
+// Validate VTU API Key
 const VTU_API_KEY = process.env.VTU_API_KEY;
+if (!VTU_API_KEY) {
+    console.error("CRITICAL ERROR: VTU_API_KEY is not set in environment variables. External API calls will fail. ❌");
+    // This won't stop the server from starting, but will make API calls fail.
+    // For a critical application, you might consider exiting the process here: process.exit(1);
+}
 const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
+
+// Middleware to check Firebase initialization and VTU_API_KEY before processing requests
+app.use((req, res, next) => {
+    if (!firebaseInitialized) {
+        return res.status(500).json({ success: false, message: `Backend service is not fully operational due to Firebase initialization failure. ${firebaseInitError || 'Check server logs for details.'}` });
+    }
+    if (!VTU_API_KEY) {
+        return res.status(500).json({ success: false, message: "Backend service is not fully operational due to missing VTU_API_KEY. Contact support." });
+    }
+    next();
+});
 
 // --- Helper Functions ---
 
@@ -134,7 +170,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
     if (!userId) return res.status(400).json({ success: false, message: 'Missing userId' });
 
     try {
-        if (!db) throw new Error('Backend not connected to Firebase');
+        // No need for `if (!db)` here due to middleware
         const snapshot = await db.ref(`users/${userId}/walletBalance`).once('value');
         const balance = Number(snapshot.val()) || 0;
         res.json({ success: true, balance });
@@ -171,9 +207,7 @@ app.post('/api/recharge', async (req, res) => {
     let userTxRef, adminTxRef;
 
     try {
-        if (!db) {
-            throw new Error(`Backend not connected to Firebase: ${initError || 'Check server logs.'}`);
-        }
+        // No need for `if (!db)` here due to middleware
 
         // Calculate correct cost for recharge cards (considering quantity and discount)
         if (service === 'recharge-card') {
@@ -435,7 +469,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
     if (!userId) return res.status(400).json({ success: false, message: 'Missing userId' });
 
     try {
-        if (!db) throw new Error('Backend not connected to Firebase');
+        // No need for `if (!db)` here due to middleware
 
         const snapshot = await db.ref(`transactions/${userId}`).limitToLast(limit).once('value');
         const transactions = [];
@@ -462,7 +496,7 @@ app.post('/api/settings/recharge-discount', async (req, res) => {
     }
 
     try {
-        if (!db) throw new Error('Backend not connected to Firebase');
+        // No need for `if (!db)` here due to middleware
         
         await db.ref('settings/recharge_card/enable_discount').set(enabled);
         
@@ -517,4 +551,9 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 5500;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+if (firebaseInitialized && VTU_API_KEY) {
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+} else {
+    console.error("Server NOT STARTED due to critical initialization errors. Please check logs above. ❌");
+    // In a production environment, you might want to exit the process here: process.exit(1);
+}
