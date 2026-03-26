@@ -83,14 +83,16 @@ if (!VTU_API_KEY) {
     // For a critical application, you might consider exiting the process here: process.exit(1);
 }
 const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
+const DALTECH_DATA_API_URL = 'https://daltechsubapi.com.ng/api/data/';
+const DALTECH_API_KEY = process.env.DALTECH_API_KEY; 
 
 // Middleware to check Firebase initialization and VTU_API_KEY before processing requests
 app.use((req, res, next) => {
     if (!firebaseInitialized) {
         return res.status(500).json({ success: false, message: `Backend service is not fully operational due to Firebase initialization failure. ${firebaseInitError || 'Check server logs for details.'}` });
     }
-    if (!VTU_API_KEY) {
-        return res.status(500).json({ success: false, message: "Backend service is not fully operational due to missing VTU_API_KEY. Contact support." });
+    if (!VTU_API_KEY || !DALTECH_API_KEY) {
+        return res.status(500).json({ success: false, message: "Backend service is not fully operational due to missing API configuration. Contact support." });
     }
     next();
 });
@@ -109,14 +111,14 @@ const getNetworkId = (networkStr) => {
 };
 
 // --- API Helper ---
-async function callApi(endpoint, payload) {
-    const url = `${MASKAWA_BASE_URL}/${endpoint}`;
-    console.log(`Calling VTU API: ${url} | Payload: ${JSON.stringify(payload)}`);
+async function callApi(url, payload, apiKey) {
+    apiKey = apiKey || VTU_API_KEY; // Default to MASKAWA API key
+    console.log(`Calling External API: ${url} | Payload: ${JSON.stringify(payload)}`);
     try {
         const response = await axios.post(url, payload, {
             headers: {
-                'Authorization': `Token ${VTU_API_KEY}`,
-                'Content-Type': 'application/json'
+                'Authorization': `Token ${apiKey}`,
+                'Content-Type': 'application/json' // Ensure content type is JSON
             },
             timeout: 60000 // 60s timeout
         });
@@ -155,8 +157,8 @@ async function callApi(endpoint, payload) {
 app.get('/api/service-status', async (req, res) => {
     try {
         // Attempt to fetch user details to verify external connectivity
-        // We use 'user/' endpoint which typically returns profile info for Maskawa/Husmodata scripts
-        await callApi('user/', {}); 
+        // Use a generic endpoint to check connectivity, e.g., Maskawa's user endpoint
+        await callApi(`${MASKAWA_BASE_URL}/user/`, {}); 
         res.json({ success: true, status: 'operational' });
     } catch (error) {
         console.error('Service Status Check Failed:', error.message);
@@ -201,7 +203,7 @@ app.post('/api/recharge', async (req, res) => {
     }
 
     let cost = Number(amount);
-    const networkId = getNetworkId(network);
+    let networkId = getNetworkId(network); // Use let as it might be modified for Daltech
 
     // Declare refs outside try block to ensure they are accessible in catch for status updates
     let userTxRef, adminTxRef;
@@ -210,7 +212,7 @@ app.post('/api/recharge', async (req, res) => {
         // No need for `if (!db)` here due to middleware
 
         // Calculate correct cost for recharge cards (considering quantity and discount)
-        if (service === 'recharge-card') {
+        if (service === 'recharge-card') { // Existing Recharge Card Logic
             const qty = Math.max(1, parseInt(quantity) || 1); // Ensure positive integer
             const discountSnap = await db.ref('settings/recharge_card/enable_discount').once('value');
             if (discountSnap.val()) {
@@ -286,7 +288,7 @@ app.post('/api/recharge', async (req, res) => {
             // B. Call Daltechsub API
             try {
                 const DALTECH_URL = 'https://daltechsubapi.com.ng/api/rechargepin/';
-                const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
+                // DALTECH_API_KEY is already defined globally from process.env
                 const ref = `EPIN_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
                 // Strict Predefined Mapping (Provider: Daltech)
@@ -313,95 +315,93 @@ app.post('/api/recharge', async (req, res) => {
                 const rcPayload = {
                     network: String(networkId),
                     quantity: String(quantity || 1),
-                    plan: planId, // Send the mapped Plan ID (e.g., '5') instead of '100'
-                    businessname: "Prime Biller",
+                    plan: planId,
+                    businessname: "BILLGRADE", // Use new branding
                     ref: ref
                 };
 
-                console.log(`Calling Daltech RC: ${JSON.stringify(rcPayload)}`);
-                const response = await axios.post(DALTECH_URL, rcPayload, {
-                    headers: {
-                        'Authorization': `Token ${DALTECH_KEY}`,
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 60000 // 60s timeout
-                });
+                console.log("DALTECH REQUEST:", rcPayload);
+                data = await callApi(DALTECH_URL, rcPayload, DALTECH_API_KEY);
+                console.log("DALTECH RESPONSE:", data);
 
-                data = response.data;
-                console.log("Daltech Response:", JSON.stringify(data));
-                
                 if (typeof data !== 'object' || data === null) {
                     throw new Error(`Provider returned an invalid, non-JSON response.`);
                 }
 
-                // Validate Success
-                // Daltech success is typically "success" or "successful" in status
                 const isSuccess = (data.status === 'success' || data.Status === 'successful');
-                
                 if (!isSuccess) {
-                    // Capture all possible error fields
                     const errorMsg = data.msg || data.message || data.error || data.detail || JSON.stringify(data);
                     throw new Error(`Provider Error: ${errorMsg}`);
                 }
 
-                // Normalize PINs to array
-                // Daltech returns "1234, 5678" string
                 let rawPins = data.pin || data.pins;
                 if (typeof rawPins === 'string') {
                     data.pins = rawPins.includes(',') ? rawPins.split(',') : [rawPins];
                 } else if (Array.isArray(rawPins)) {
                     data.pins = rawPins;
                 } else {
-                    data.pins = []; // Fallback
+                    data.pins = [];
                 }
 
-                // C. Finalize Deduction on Success
-                await userRef.child('walletBalance').transaction(current => {
-                    return (Number(current) || 0) - cost;
-                });
+                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
 
             } catch (error) {
-                // No refund needed since we didn't deduct yet
-                console.error("RC Purchase Failed (No Deduction):", {
-                    message: error.message,
-                    response: error.response?.data
-                });
-                
-                if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-                    throw new Error("Request timeout. Please try again.");
-                }
-                if (!error.response) {
-                    throw new Error("Recharge service temporarily unavailable. Please try again later.");
-                }
-                
+                console.error("RC Purchase Failed (No Deduction):", { message: error.message, response: error.response?.data });
+                if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) throw new Error("Request timeout. Please try again.");
+                if (!error.response) throw new Error("Recharge service temporarily unavailable. Please try again later.");
                 throw error;
             }
 
-        } else {
-            // --- STANDARD FLOW (Airtime/Data) ---
-            if (service === 'airtime') {
-                endpoint = 'topup/';
-                payload = { network: networkId, amount: cost, mobile_number: phone_number, Ported_number: true, airtime_type: 'VTU' };
-            } else if (service === 'data') {
-                endpoint = 'data/';
-                payload = { network: networkId, plan: plan, mobile_number: phone_number, Ported_number: true };
-            } else {
-                return res.status(400).json({ success: false, message: 'Invalid service type' });
-            }
+        } else if (service === 'airtime') { // Existing Airtime Logic
+            const endpoint = 'topup/';
+            const payload = { network: networkId, amount: cost, mobile_number: phone_number, Ported_number: true, airtime_type: 'VTU' };
+            data = await callApi(`${MASKAWA_BASE_URL}/${endpoint}`, payload, VTU_API_KEY);
 
-            // Call Maskawa API
-            data = await callApi(endpoint, payload);
-
-            // Check Success
             const isExplicitFailure = (data.Status && String(data.Status).toLowerCase().includes('fail')) || (data.status && String(data.status).toLowerCase().includes('fail')) || (data.success === 'false') || (data.success === false);
             if (isExplicitFailure) {
                 throw new Error(data.message || data.error || 'Provider returned failure status');
             }
 
-            // Deduct Balance (Standard Flow)
             await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
+
+        } else if (service === 'data') { // NEW DALTECHSUB DATA LOGIC
+            const ref = `DATA_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+            const dataPayload = {
+                network: String(networkId),
+                phone: phone_number,
+                ref: ref,
+                plan: plan, // This is the plan_id from Daltech
+                ported_number: true
+            };
+
+            try {
+                data = await callApi(DALTECH_DATA_API_URL, dataPayload, DALTECH_API_KEY);
+                console.log("Daltech Data Response:", JSON.stringify(data));
+
+                if (typeof data !== 'object' || data === null) {
+                    throw new Error(`Provider returned an invalid, non-JSON response.`);
+                }
+
+                const isSuccess = (data.status === 'success' || data.Status === 'successful');
+                if (!isSuccess) {
+                    const errorMsg = data.msg || data.message || data.error || data.detail || JSON.stringify(data);
+                    throw new Error(`Provider Error: ${errorMsg}`);
+                }
+
+                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
+
+            } catch (error) {
+                console.error("Data Purchase Failed (No Deduction):", { message: error.message, response: error.response?.data });
+                if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) throw new Error("Request timeout. Please try again.");
+                if (!error.response) throw new Error("Data service temporarily unavailable. Please try again later.");
+                throw error;
+            }
+
+        } else {
+            return res.status(400).json({ success: false, message: 'Invalid service type' });
         }
 
+        // Common success handling for all services after deduction
         // 6. Update to Successful & Record Provider Response
         const successUpdate = { 
             status: 'Successful',
@@ -509,10 +509,106 @@ app.post('/api/settings/recharge-discount', async (req, res) => {
 
 // --- Dynamic Plan Management ---
 
+// New endpoint to fetch data plans from Daltech
+app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
+    const { networkId } = req.params;
+    if (!networkId) {
+        return res.status(400).json({ success: false, message: 'Network ID is required.' });
+    }
+
+    try {
+        const DALTECH_DATA_PLANS_URL = 'https://daltechsubapi.com.ng/api/data/'; // Assuming this endpoint lists plans
+        const response = await axios.get(DALTECH_DATA_PLANS_URL, {
+            headers: { 'Authorization': `Token ${DALTECH_API_KEY}` },
+            params: { network: networkId } // Filter by network if API supports it
+        });
+        
+        const daltechPlans = response.data.data; // Assuming plans are in a 'data' field
+        if (!Array.isArray(daltechPlans)) {
+            throw new Error("Invalid data plans format received from provider.");
+        }
+
+        // Filter and normalize plans to include only relevant fields and vendor price
+        const plans = daltechPlans.map(p => ({
+            plan_id: p.plan_id,
+            name: p.plan_name, // Assuming plan_name is the descriptive name
+            validity: p.validity,
+            price: p.price, // This is the vendor price
+            category: p.plan_type || 'General' // Assuming plan_type can be used for category
+        }));
+
+        res.json({ success: true, plans: plans });
+    } catch (error) {
+        console.error('Daltech Data Plans Fetch Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Failed to fetch data plans from provider', 
+            error: error.message,
+            providerResponse: error.response?.data 
+        });
+    }
+});
+
+// Existing endpoint to fetch RC plans from Daltech (Utility Endpoint for Admin Inspection)
+app.get('/api/daltech/plans', async (req, res) => {
+    try {
+        const DALTECH_RC_KEY = DALTECH_API_KEY; // Use the environment variable for consistency
+        const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
+            headers: { 'Authorization': `Token ${DALTECH_RC_KEY}` }
+        });
+        res.json({ success: true, data: response.data });
+    } catch (error) {
+        console.error('Daltech Fetch Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Failed to fetch plans from provider', 
+            error: error.message,
+            providerResponse: error.response?.data 
+        });
+    }
+});
+
+// Save Plan Mapping to Firebase
+app.post('/api/settings/rc-plans', async (req, res) => {
+    // Expected payload: { "1": { "100": "5", "200": "6" }, "2": { ... } }
+    const mappings = req.body;
+    if (!mappings || typeof mappings !== 'object') {
+        return res.status(400).json({ success: false, message: 'Invalid mapping data' });
+    }
+    try {
+        await db.ref('settings/recharge_card/plans').set(mappings);
+        res.json({ success: true, message: 'Recharge card plan mappings updated successfully.' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Update Recharge Card Discount Setting
+app.post('/api/settings/recharge-discount', async (req, res) => {
+    const { enabled } = req.body;
+
+    if (enabled === undefined || typeof enabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'Invalid payload: "enabled" (boolean) is required.' });
+    }
+
+    try {
+        // No need for `if (!db)` here due to middleware
+        
+        await db.ref('settings/recharge_card/enable_discount').set(enabled);
+        
+        res.json({ success: true, message: `Recharge card discount ${enabled ? 'enabled' : 'disabled'} successfully.` });
+    } catch (error) {
+        console.error('Settings Update Error:', error.message);
+        res.status(500).json({ success: false, message: 'Failed to update settings.' });
+    }
+});
+
+// --- Dynamic Plan Management ---
+
 // Fetch Plans from Daltech (Utility Endpoint for Admin Inspection)
 app.get('/api/daltech/plans', async (req, res) => {
     try {
-        const DALTECH_KEY = 'HACC3C3vBis67qwC2tEA0CFbn82l3d7A24exB9z3BJxpoC8acrxc4mkA5AI91774270916';
+        const DALTECH_KEY = DALTECH_API_KEY;
         // Note: This endpoint assumes Daltech supports GET on the base URL for plans.
         // If they use a specific path like /plans or /prices, update the URL below.
         const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
@@ -549,11 +645,3 @@ app.post('/api/settings/rc-plans', async (req, res) => {
 app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.originalUrl}` });
 });
-
-const PORT = process.env.PORT || 5500;
-if (firebaseInitialized && VTU_API_KEY) {
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-} else {
-    console.error("Server NOT STARTED due to critical initialization errors. Please check logs above. ❌");
-    // In a production environment, you might want to exit the process here: process.exit(1);
-}
