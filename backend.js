@@ -84,15 +84,12 @@ if (!VTU_API_KEY) {
 }
 const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
 const DALTECH_DATA_API_URL = 'https://daltechsubapi.com.ng/api/data/';
-const DALTECH_API_KEY = process.env.DALTECH_API_KEY; 
+const DALTECH_API_KEY = process.env.DALTECH_API_KEY;
 
 // Middleware to check Firebase initialization and VTU_API_KEY before processing requests
 app.use((req, res, next) => {
     if (!firebaseInitialized) {
         return res.status(500).json({ success: false, message: `Backend service is not fully operational due to Firebase initialization failure. ${firebaseInitError || 'Check server logs for details.'}` });
-    }
-    if (!VTU_API_KEY || !DALTECH_API_KEY) {
-        return res.status(500).json({ success: false, message: "Backend service is not fully operational due to missing API configuration. Contact support." });
     }
     next();
 });
@@ -153,6 +150,18 @@ async function callApi(url, payload, apiKey) {
 
 // --- Endpoints ---
 
+// Dedicated Foreign Number Module
+const foreignNumberRoutes = require('./js/foreignNumbers');
+app.use('/api/proxnum', foreignNumberRoutes);
+
+// Exchange Rate Helper (Global)
+app.get('/api/exchange-rate', async (req, res) => {
+    try {
+        const rate = await require('./services/proxnumService').getExchangeRate();
+        res.json({ success: true, rate });
+    } catch (e) { res.status(500).json({ rate: 1600 }); }
+});
+
 // Check External Service Status
 app.get('/api/service-status', async (req, res) => {
     try {
@@ -185,6 +194,10 @@ app.get('/api/wallet/:userId', async (req, res) => {
 // Matches /api/recharge used in frontend Bills.js
 app.post('/api/recharge', async (req, res) => {
     const { userId, service, amount, network, phone_number, plan, planName, quantity, profit } = req.body;
+
+    if (!VTU_API_KEY || !DALTECH_API_KEY) {
+        return res.status(500).json({ success: false, message: "Server API configuration is missing for recharge services." });
+    }
 
     // Generate a local request ID for tracing logs
     const requestId = `req_${Date.now()}`;
@@ -555,64 +568,6 @@ app.get('/api/daltech/plans', async (req, res) => {
         const DALTECH_RC_KEY = DALTECH_API_KEY; // Use the environment variable for consistency
         const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
             headers: { 'Authorization': `Token ${DALTECH_RC_KEY}` }
-        });
-        res.json({ success: true, data: response.data });
-    } catch (error) {
-        console.error('Daltech Fetch Error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to fetch plans from provider', 
-            error: error.message,
-            providerResponse: error.response?.data 
-        });
-    }
-});
-
-// Save Plan Mapping to Firebase
-app.post('/api/settings/rc-plans', async (req, res) => {
-    // Expected payload: { "1": { "100": "5", "200": "6" }, "2": { ... } }
-    const mappings = req.body;
-    if (!mappings || typeof mappings !== 'object') {
-        return res.status(400).json({ success: false, message: 'Invalid mapping data' });
-    }
-    try {
-        await db.ref('settings/recharge_card/plans').set(mappings);
-        res.json({ success: true, message: 'Recharge card plan mappings updated successfully.' });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Update Recharge Card Discount Setting
-app.post('/api/settings/recharge-discount', async (req, res) => {
-    const { enabled } = req.body;
-
-    if (enabled === undefined || typeof enabled !== 'boolean') {
-        return res.status(400).json({ success: false, message: 'Invalid payload: "enabled" (boolean) is required.' });
-    }
-
-    try {
-        // No need for `if (!db)` here due to middleware
-        
-        await db.ref('settings/recharge_card/enable_discount').set(enabled);
-        
-        res.json({ success: true, message: `Recharge card discount ${enabled ? 'enabled' : 'disabled'} successfully.` });
-    } catch (error) {
-        console.error('Settings Update Error:', error.message);
-        res.status(500).json({ success: false, message: 'Failed to update settings.' });
-    }
-});
-
-// --- Dynamic Plan Management ---
-
-// Fetch Plans from Daltech (Utility Endpoint for Admin Inspection)
-app.get('/api/daltech/plans', async (req, res) => {
-    try {
-        const DALTECH_KEY = DALTECH_API_KEY;
-        // Note: This endpoint assumes Daltech supports GET on the base URL for plans.
-        // If they use a specific path like /plans or /prices, update the URL below.
-        const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
-            headers: { 'Authorization': `Token ${DALTECH_KEY}` }
         });
         res.json({ success: true, data: response.data });
     } catch (error) {
