@@ -26,8 +26,8 @@ let firebaseInitError = null; // Stores any error message from Firebase init
 try {
     // Initialize Firebase Admin SDK
     if (!admin.apps.length) {
-        const privateKey = process.env.FIREBASE_PRIVATE_KEY 
-            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim() 
+        const privateKey = process.env.FIREBASE_PRIVATE_KEY
+            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim()
             : undefined;
 
         // Validate essential Firebase environment variables
@@ -91,6 +91,9 @@ app.use((req, res, next) => {
     if (!firebaseInitialized) {
         return res.status(500).json({ success: false, message: `Backend service is not fully operational due to Firebase initialization failure. ${firebaseInitError || 'Check server logs for details.'}` });
     }
+    if (!VTU_API_KEY || !DALTECH_API_KEY) {
+        return res.status(500).json({ success: false, message: "Backend service is not fully operational due to missing API configuration. Contact support." });
+    }
     next();
 });
 
@@ -150,24 +153,12 @@ async function callApi(url, payload, apiKey) {
 
 // --- Endpoints ---
 
-// Dedicated Foreign Number Module
-const foreignNumberRoutes = require('./js/foreignNumbers');
-app.use('/api/proxnum', foreignNumberRoutes);
-
-// Exchange Rate Helper (Global)
-app.get('/api/exchange-rate', async (req, res) => {
-    try {
-        const rate = await require('./services/proxnumService').getExchangeRate();
-        res.json({ success: true, rate });
-    } catch (e) { res.status(500).json({ rate: 1600 }); }
-});
-
 // Check External Service Status
 app.get('/api/service-status', async (req, res) => {
     try {
         // Attempt to fetch user details to verify external connectivity
         // Use a generic endpoint to check connectivity, e.g., Maskawa's user endpoint
-        await callApi(`${MASKAWA_BASE_URL}/user/`, {}); 
+        await callApi(`${MASKAWA_BASE_URL}/user/`, {});
         res.json({ success: true, status: 'operational' });
     } catch (error) {
         console.error('Service Status Check Failed:', error.message);
@@ -194,10 +185,6 @@ app.get('/api/wallet/:userId', async (req, res) => {
 // Matches /api/recharge used in frontend Bills.js
 app.post('/api/recharge', async (req, res) => {
     const { userId, service, amount, network, phone_number, plan, planName, quantity, profit } = req.body;
-
-    if (!VTU_API_KEY || !DALTECH_API_KEY) {
-        return res.status(500).json({ success: false, message: "Server API configuration is missing for recharge services." });
-    }
 
     // Generate a local request ID for tracing logs
     const requestId = `req_${Date.now()}`;
@@ -240,7 +227,7 @@ app.post('/api/recharge', async (req, res) => {
             network: network || 'N/A',
             phone: phone_number || 'N/A',
             plan: safePlan,
-            ...(planName && { planName }), 
+            ...(planName && { planName }),
             ...(quantity && { quantity })  
         };
 
@@ -289,11 +276,11 @@ app.post('/api/recharge', async (req, res) => {
 
         if (service === 'recharge-card') {
             // --- RECHARGE CARD SPECIFIC FLOW (DALTECHSUB) ---
-            
+           
             // A. Validate Balance (No deduction yet)
             const balanceSnap = await userRef.child('walletBalance').once('value');
             const currentBal = Number(balanceSnap.val()) || 0;
-            
+           
             if (currentBal < cost) {
                 throw new Error('Insufficient wallet balance.');
             }
@@ -416,7 +403,7 @@ app.post('/api/recharge', async (req, res) => {
 
         // Common success handling for all services after deduction
         // 6. Update to Successful & Record Provider Response
-        const successUpdate = { 
+        const successUpdate = {
             status: 'Successful',
             providerResponse: data
         };
@@ -425,7 +412,7 @@ app.post('/api/recharge', async (req, res) => {
 
         // 7. Return Success
         const pins = data.pins || (data.pin ? [data.pin] : (data.token ? [data.token] : []));
-        
+       
         const response = {
             success: true,
             message: service === 'recharge-card' ? 'Recharge card generated successfully' : 'Transaction successful',
@@ -451,18 +438,18 @@ app.post('/api/recharge', async (req, res) => {
         // Extract detailed error message from provider response
         const errData = error.response?.data || {};
         const msg = (typeof errData === 'string' ? errData : (errData.message || errData.msg || errData.error || errData.detail)) || error.message || 'Transaction failed';
-        
+       
         console.error('Recharge Endpoint Error:', {
             requestId: requestId,
             errorMessage: error.message,
             providerResponse: errData,
             stack: error.stack
         });
-        
+       
         // Update logs to Failed
         if (userTxRef && adminTxRef) {
-            const failUpdate = { 
-                status: 'Failed', 
+            const failUpdate = {
+                status: 'Failed',
                 reason: msg,
                 providerResponse: errData || null
             };
@@ -486,7 +473,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
 
         const snapshot = await db.ref(`transactions/${userId}`).limitToLast(limit).once('value');
         const transactions = [];
-        
+       
         // snapshot.forEach iterates in key order (oldest to newest for push IDs)
         // We unshift to reverse array so newest is first
         snapshot.forEach(child => {
@@ -510,9 +497,9 @@ app.post('/api/settings/recharge-discount', async (req, res) => {
 
     try {
         // No need for `if (!db)` here due to middleware
-        
+       
         await db.ref('settings/recharge_card/enable_discount').set(enabled);
-        
+       
         res.json({ success: true, message: `Recharge card discount ${enabled ? 'enabled' : 'disabled'} successfully.` });
     } catch (error) {
         console.error('Settings Update Error:', error.message);
@@ -535,7 +522,7 @@ app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
             headers: { 'Authorization': `Token ${DALTECH_API_KEY}` },
             params: { network: networkId } // Filter by network if API supports it
         });
-        
+       
         const daltechPlans = response.data.data; // Assuming plans are in a 'data' field
         if (!Array.isArray(daltechPlans)) {
             throw new Error("Invalid data plans format received from provider.");
@@ -553,11 +540,11 @@ app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
         res.json({ success: true, plans: plans });
     } catch (error) {
         console.error('Daltech Data Plans Fetch Error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to fetch data plans from provider', 
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch data plans from provider',
             error: error.message,
-            providerResponse: error.response?.data 
+            providerResponse: error.response?.data
         });
     }
 });
@@ -572,11 +559,69 @@ app.get('/api/daltech/plans', async (req, res) => {
         res.json({ success: true, data: response.data });
     } catch (error) {
         console.error('Daltech Fetch Error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to fetch plans from provider', 
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch plans from provider',
             error: error.message,
-            providerResponse: error.response?.data 
+            providerResponse: error.response?.data
+        });
+    }
+});
+
+// Save Plan Mapping to Firebase
+app.post('/api/settings/rc-plans', async (req, res) => {
+    // Expected payload: { "1": { "100": "5", "200": "6" }, "2": { ... } }
+    const mappings = req.body;
+    if (!mappings || typeof mappings !== 'object') {
+        return res.status(400).json({ success: false, message: 'Invalid mapping data' });
+    }
+    try {
+        await db.ref('settings/recharge_card/plans').set(mappings);
+        res.json({ success: true, message: 'Recharge card plan mappings updated successfully.' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Update Recharge Card Discount Setting
+app.post('/api/settings/recharge-discount', async (req, res) => {
+    const { enabled } = req.body;
+
+    if (enabled === undefined || typeof enabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'Invalid payload: "enabled" (boolean) is required.' });
+    }
+
+    try {
+        // No need for `if (!db)` here due to middleware
+       
+        await db.ref('settings/recharge_card/enable_discount').set(enabled);
+       
+        res.json({ success: true, message: `Recharge card discount ${enabled ? 'enabled' : 'disabled'} successfully.` });
+    } catch (error) {
+        console.error('Settings Update Error:', error.message);
+        res.status(500).json({ success: false, message: 'Failed to update settings.' });
+    }
+});
+
+// --- Dynamic Plan Management ---
+
+// Fetch Plans from Daltech (Utility Endpoint for Admin Inspection)
+app.get('/api/daltech/plans', async (req, res) => {
+    try {
+        const DALTECH_KEY = DALTECH_API_KEY;
+        // Note: This endpoint assumes Daltech supports GET on the base URL for plans.
+        // If they use a specific path like /plans or /prices, update the URL below.
+        const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
+            headers: { 'Authorization': `Token ${DALTECH_KEY}` }
+        });
+        res.json({ success: true, data: response.data });
+    } catch (error) {
+        console.error('Daltech Fetch Error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch plans from provider',
+            error: error.message,
+            providerResponse: error.response?.data
         });
     }
 });
