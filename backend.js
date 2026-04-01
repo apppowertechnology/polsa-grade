@@ -160,17 +160,17 @@ async function callApi(url, payload, apiKey) {
 // --- Endpoints ---
 
 // Dedicated Gift Card Module
-const giftCardRoutes = require('./js/giftCards');
+const giftCardRoutes = require('./js/giftcards');
 app.use('/api/giftcards', giftCardRoutes);
 
 // REQUEST: Webhook for Gift Card Success Delivery
-const gcController = require('./js/giftCardController');
+const gcController = require('./js/giftcardcontroller');
 app.post('/api/webhook/giftcards', gcController.handleWebhook);
 
 // Exchange Rate Helper (Global)
 app.get('/api/exchange-rate', async (req, res) => {
     try {
-        const rate = await require('./js/exchangeRateService').getRate();
+        const rate = await require('./js/exchangerateservice').getRate();
         res.json({ success: true, rate });
     } catch (e) { res.status(500).json({ rate: 1600 }); }
 });
