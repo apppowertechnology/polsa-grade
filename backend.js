@@ -223,39 +223,41 @@ app.get('/api/service-status', async (req, res) => {
 // --- Filtered Data Plans API (Requirement 6) ---
 app.get('/api/plans/filtered', async (req, res) => {
     const { network } = req.query;
+    console.log(`[DataPlans] Network received: ${network}`);
     if (!network) return res.status(400).json({ success: false, message: 'Network is required' });
 
     try {
         const networkKey = network.toLowerCase();
-        // Pointing to services/data_plans where actual operational data is stored
         const snapshot = await db.ref(`services/data_plans/${networkKey}`).once('value');
         const dbPlans = snapshot.val() || {};
 
         const plansByCat = {};
-        const categories = new Set();
+        const entries = Object.entries(dbPlans);
+        console.log(`[DataPlans] Found ${entries.length} raw plans for ${networkKey}`);
 
-        Object.entries(dbPlans).forEach(([id, p]) => {
+        entries.forEach(([id, p]) => {
+            // Requirement: Do NOT discard if status missing. Only skip if status === false.
             if (!p || p.status === false) return;
             
-            // Extract categories (SME 1, SME 2, Gifting, etc.)
-            let cat = p.plan_category || p.category || 'Other';
-            const catLower = cat.toLowerCase();
-            if (['all', 'number seven', 'none', 'deprecated'].includes(catLower)) return;
+            // Normalize category: plan_category OR category OR planCategory
+            const cat = p.plan_category || p.category || p.planCategory || 'General';
 
             // Group plans by category
-            if (!plansByCat[p.plan_category || cat]) plansByCat[p.plan_category || cat] = [];
-            plansByCat[p.plan_category || cat].push({
+            if (!plansByCat[cat]) plansByCat[cat] = [];
+            plansByCat[cat].push({
                 id: id,
                 plan_name: p.plan_name || p.name,
-                api_cost: p.api_cost || 0,
-                selling_price: p.selling_price || p.price || 0,
-                validity: p.validity
+                price: Number(p.selling_price || p.price || 0),
+                api_cost: Number(p.api_cost || p.apiCost || 0),
+                validity: p.validity || 'N/A'
             });
         });
 
         const sortedCategories = Object.keys(plansByCat).sort();
+        console.log(`[DataPlans] Categories generated: ${sortedCategories.join(', ')}`);
+
         res.json({
-            network: network.toUpperCase(),
+            success: true,
             categories: sortedCategories,
             plans: plansByCat
         });
@@ -790,7 +792,72 @@ app.get('/api/admin/provider-balances', async (req, res) => {
     }
 });
 
+// --- Maskawa Admin Balance Endpoint ---
+app.get('/api/admin/maskawa-balance', async (req, res) => {
+    try {
+        const response = await axios.get(
+            "https://maskawasub.com/api/user/",
+            {
+                headers: {
+                    'Authorization': `Token ${process.env.VTU_API_KEY}`,
+                    'Content-Type': 'application/json',
+                },
+                timeout: 10000, // 10 seconds timeout
+            }
+        );
+
+        return res.json({
+            success: true,
+            balance: response.data?.user?.wallet_balance || response.data?.wallet_balance,
+            user: response.data?.user?.username || response.data?.username,
+        });
+
+    } catch (error) {
+        console.error("Maskawa Balance Error:", error.response?.data || error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: "Unable to fetch balance",
+        });
+    }
+});
+
+// --- Daltech Admin Balance Endpoint ---
+app.get('/api/admin/daltech-balance', async (req, res) => {
+    try {
+        const response = await axios.get(
+            "https://daltechsubapi.com.ng/api/user/",
+            {
+                headers: {
+                    'Authorization': `Token ${process.env.DALTECH_API_KEY}`,
+                    'Content-Type': 'application/json',
+                },
+                timeout: 10000, // 10 seconds timeout
+            }
+        );
+
+        return res.json({
+            success: true,
+            balance: response.data?.user?.wallet_balance || response.data?.wallet_balance,
+            user: response.data?.user?.username || response.data?.username,
+        });
+
+    } catch (error) {
+        console.error("Daltech Balance Error:", error.response?.data || error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: "Unable to fetch balance",
+        });
+    }
+});
+
 // --- 404 Handler for Unknown Routes ---
 app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+// --- Global Stability Protection ---
+process.on("unhandledRejection", (err) => {
+    console.error("CRITICAL: Unhandled Rejection:", err);
 });
