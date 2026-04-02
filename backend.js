@@ -13,6 +13,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- Environment Variable Validation ---
+const REQUIRED_ENV_VARS = [
+    'FIREBASE_PROJECT_ID',
+    'FIREBASE_CLIENT_EMAIL',
+    'FIREBASE_PRIVATE_KEY',
+    'FIREBASE_DATABASE_URL',
+    'VTU_API_KEY',
+    'DALTECH_API_KEY'
+];
+
+REQUIRED_ENV_VARS.forEach(varName => {
+    if (!process.env[varName]) {
+        console.error(`CRITICAL STARTUP ERROR: Environment variable "${varName}" is missing! ❌`);
+        process.exit(1); // Stop the server immediately
+    }
+});
+
 // --- Root Route ---
 app.get('/', (req, res) => {
     res.send('Backend is running!');
@@ -29,20 +46,6 @@ try {
         const privateKey = process.env.FIREBASE_PRIVATE_KEY 
             ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim() 
             : undefined;
-
-        // Validate essential Firebase environment variables
-        if (!process.env.FIREBASE_PROJECT_ID) {
-            throw new Error("FIREBASE_PROJECT_ID is not set in environment variables.");
-        }
-        if (!process.env.FIREBASE_CLIENT_EMAIL) {
-            throw new Error("FIREBASE_CLIENT_EMAIL is not set in environment variables.");
-        }
-        if (!privateKey) {
-            throw new Error("FIREBASE_PRIVATE_KEY is not set or is empty in environment variables.");
-        }
-        if (!process.env.FIREBASE_DATABASE_URL) {
-            throw new Error("FIREBASE_DATABASE_URL is not set in environment variables.");
-        }
 
         admin.initializeApp({
             credential: admin.credential.cert({
@@ -76,12 +79,7 @@ try {
 }
 
 // Validate VTU API Key
-const VTU_API_KEY = process.env.VTU_API_KEY;
-if (!VTU_API_KEY) {
-    console.error("CRITICAL ERROR: VTU_API_KEY is not set in environment variables. External API calls will fail. ❌");
-    // This won't stop the server from starting, but will make API calls fail.
-    // For a critical application, you might consider exiting the process here: process.exit(1);
-}
+const VTU_API_KEY = process.env.VTU_API_KEY; // Now guaranteed by validation above
 const MASKAWA_BASE_URL = 'https://maskawasub.com/api';
 const DALTECH_DATA_API_URL = 'https://daltechsubapi.com.ng/api/data/';
 const DALTECH_API_KEY = process.env.DALTECH_API_KEY;
@@ -158,14 +156,6 @@ async function callApi(url, payload, apiKey) {
 }
 
 // --- Endpoints ---
-
-// Dedicated Gift Card Module
-const giftCardRoutes = require('./js/giftcards');
-app.use('/api/giftcards', giftCardRoutes);
-
-// REQUEST: Webhook for Gift Card Success Delivery
-const gcController = require('./js/giftcardcontroller');
-app.post('/api/webhook/giftcards', gcController.handleWebhook);
 
 // Exchange Rate Helper (Global)
 app.get('/api/exchange-rate', async (req, res) => {
