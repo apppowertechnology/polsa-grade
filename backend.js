@@ -70,8 +70,8 @@ let firebaseInitError = null; // Stores any error message from Firebase init
 try {
     // Initialize Firebase Admin SDK
     if (!admin.apps.length) {
-        const privateKey = process.env.FIREBASE_PRIVATE_KEY 
-            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim() 
+        const privateKey = process.env.FIREBASE_PRIVATE_KEY
+            ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').trim()
             : undefined;
 
         admin.initializeApp({
@@ -140,34 +140,19 @@ const getNetworkKey = (networkId) => {
 };
 
 // --- API Helper ---
-async function callApi(url, payload, apiKey, method = 'POST') {
+async function callApi(url, payload, apiKey) {
     const isDaltech = url.includes('daltechsubapi');
     const authHeader = isDaltech ? `Token ${apiKey}` : `Token ${apiKey || VTU_API_KEY}`;
-    
-    console.log(`Calling External API (${method}): ${url} | Payload: ${JSON.stringify(payload)}`);
+
+    console.log(`Calling External API: ${url} | Payload: ${JSON.stringify(payload)}`);
     try {
-        const config = {
-            method: method,
-            url: url,
+        const response = await axios.post(url, payload, {
             headers: {
                 'Authorization': authHeader,
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'Content-Type': 'application/json' // Ensure content type is JSON
             },
-            timeout: 60000
-        };
-
-        if (method === 'POST') {
-            config.data = payload;
-        } else {
-            // For GET requests, only add params if they aren't empty to avoid trailing '?'
-            if (payload && Object.keys(payload).length > 0) {
-                config.params = payload;
-            }
-            delete config.headers['Content-Type']; // Some servers reject GETs with this header
-        }
-
-        const response = await axios(config);
+            timeout: 60000 // 60s timeout
+        });
         return response.data;
     } catch (error) {
         // Log detailed error for debugging
@@ -212,7 +197,7 @@ app.get('/api/service-status', async (req, res) => {
     try {
         // Attempt to fetch user details to verify external connectivity
         // Use a generic endpoint to check connectivity, e.g., Maskawa's user endpoint
-        await callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY, 'GET'); 
+        await callApi(`${MASKAWA_BASE_URL}/user/`, {});
         res.json({ success: true, status: 'operational' });
     } catch (error) {
         console.error('Service Status Check Failed:', error.message);
@@ -223,59 +208,57 @@ app.get('/api/service-status', async (req, res) => {
 // --- Filtered Data Plans API (Requirement 6) ---
 app.get('/api/plans/filtered', async (req, res) => {
     const { network } = req.query;
-    console.log(`[DataPlans] Network received: ${network}`);
     if (!network) return res.status(400).json({ success: false, message: 'Network is required' });
 
     try {
         const networkKey = network.toLowerCase();
-        const snapshot = await db.ref(`services/data_plans/${networkKey}`).once('value');
-        const dbPlans = snapshot.val() || {};
+        const plansSnapshot = await db.ref(`settings/data_plans/${networkKey}`).once('value');
+        const dbPlans = plansSnapshot.val() || {};
 
         const plansByCat = {};
-        const entries = Object.entries(dbPlans);
-        console.log(`[DataPlans] Found ${entries.length} raw plans for ${networkKey}`);
+        const categoryMap = {
+            'Awoof': 'Awoof Plans',
+            'SME': 'SME Plans',
+            'SME2': 'SME2 Plans',
+            'Gifting': 'Gifting Plans',
+            'Coupon': 'Coupon Plans',
+            'Corporate': 'Corporate Plans'
+        };
 
-        entries.forEach(([id, p]) => {
-            // Requirement: Do NOT discard if status missing. Only skip if status === false.
+        // Specific order requested for the UI
+        const requestedOrder = ['Awoof Plans', 'SME Plans', 'SME2 Plans', 'Gifting Plans', 'Coupon Plans', 'Corporate Plans'];
+        const activeCategories = new Set();
+
+        Object.entries(dbPlans).forEach(([id, p]) => {
             if (!p || p.status === false) return;
-            
-            // Normalize category: plan_category OR category OR planCategory
-            const cat = p.plan_category || p.category || p.planCategory || 'General';
 
-            // Group plans by category
+            let cat = p.plan_category || p.category || 'General';
+
+            // Map internal category names to requested display names
+            if (categoryMap[cat]) cat = categoryMap[cat];
+
+            const catLower = cat.toLowerCase();
+            if (['all', 'number seven', 'none', 'deprecated'].includes(catLower)) return;
+
+            activeCategories.add(cat);
             if (!plansByCat[cat]) plansByCat[cat] = [];
             plansByCat[cat].push({
                 id: id,
                 plan_name: p.plan_name || p.name,
-                price: Number(p.selling_price || p.price || 0),
-                api_cost: Number(p.api_cost || p.apiCost || 0),
-                validity: p.validity || 'N/A'
+                api_cost: p.api_cost || 0,
+                selling_price: p.selling_price || p.price || 0,
+                validity: p.validity
             });
         });
 
-        const sortedCategories = Object.keys(plansByCat).sort();
-        console.log(`[DataPlans] Categories generated: ${sortedCategories.join(', ')}`);
+        // Filter the requested order to only include categories that actually have plans available
+        const finalCategories = requestedOrder.filter(c => activeCategories.has(c));
 
         res.json({
             success: true,
-            categories: sortedCategories,
+            categories: finalCategories,
             plans: plansByCat
         });
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-});
-
-// Get Wallet Balance
-app.get('/api/wallet/:userId', authenticate, async (req, res) => {
-    const { userId } = req.params;
-    if (!userId) return res.status(400).json({ success: false, message: 'Missing userId' });
-
-    try {
-        // No need for `if (!db)` here due to middleware
-        const snapshot = await db.ref(`users/${userId}/walletBalance`).once('value');
-        const balance = Number(snapshot.val()) || 0;
-        res.json({ success: true, balance });
     } catch (error) {
         console.error('Wallet Error:', error.message);
         res.status(500).json({ success: false, message: 'Failed to fetch wallet balance' });
@@ -284,7 +267,7 @@ app.get('/api/wallet/:userId', authenticate, async (req, res) => {
 
 // Matches /api/recharge used in frontend Bills.js
 app.post('/api/recharge', authenticate, async (req, res) => {
-    let { userId, service, amount, network, phone_number, plan, planName, quantity, profit } = req.body;
+    const { userId, service, amount, network, phone_number, plan, planName, quantity, profit } = req.body;
 
     if (!VTU_API_KEY || !DALTECH_API_KEY) {
         return res.status(500).json({ success: false, message: "Server API configuration is missing for recharge services." });
@@ -327,10 +310,10 @@ app.post('/api/recharge', authenticate, async (req, res) => {
             // 'plan' from frontend is now the Firebase key (e.g., 'plan_6')
             const planFirebaseKey = plan;
             const networkKey = getNetworkKey(networkId);
-            
-            const planSnap = await db.ref(`services/data_plans/${networkKey}/${planFirebaseKey}`).once('value');
+
+            const planSnap = await db.ref(`settings/data_plans/${networkKey}/${planFirebaseKey}`).once('value');
             planData = planSnap.val();
-            
+
             if (!planData) {
                 throw new Error(`Data plan with ID ${planFirebaseKey} not found for network ${networkKey}.`);
             }
@@ -344,7 +327,7 @@ app.post('/api/recharge', authenticate, async (req, res) => {
             plan = planData.apiPlanId;
 
             console.log(`Valuation [${userRole}]: Plan ${planData.plan_name || planData.name}, Selling Price: ₦${cost}, Profit: ₦${calculatedProfit}`);
-            
+
             // Also update planName for logging
             planName = planData.plan_name || planData.name;
 
@@ -370,8 +353,8 @@ app.post('/api/recharge', authenticate, async (req, res) => {
             network: network || 'N/A',
             phone: phone_number || 'N/A',
             plan: safePlan,
-            ...(planName && { planName }), 
-            ...(quantity && { quantity })  
+            ...(planName && { planName }),
+            ...(quantity && { quantity })
         };
 
         userTxRef = db.ref(`transactions/${userId}`).push();
@@ -379,22 +362,22 @@ app.post('/api/recharge', authenticate, async (req, res) => {
         const firebaseTxId = userTxRef.key;
         const timestamp = new Date().toISOString();
 
-        // Exact amount check for logging
         let txData = {
             type: 'purchase',
             feature: service,
             amount: cost,
             profit: calculatedProfit,
-            status: 'Processing',
+            status: 'Pending',
             transactionId: requestId,
             date: timestamp,
             timestamp: timestamp, // Required for admin panel sorting/display
             details: details
-        }; 
+        };
         // Add plan details to txData for data purchases
         if (service === 'data' && planData) txData.details = { ...txData.details, ...planData };
 
-        // Record initial processing state
+
+        // Write 'Pending' state to both User History and Admin Payments
         await userTxRef.set(txData);
         await adminTxRef.set({ ...txData, userId, firebaseTxId, email: 'Processing...' });
 
@@ -425,7 +408,7 @@ app.post('/api/recharge', authenticate, async (req, res) => {
                 };
                 const networkPlans = RC_PLAN_MAPPING[String(networkId)];
                 if (!networkPlans) throw new Error(`Network not supported for recharge cards.`);
-                
+
                 const planId = networkPlans[String(amount)];
                 if (!planId) throw new Error(`Invalid amount (₦${amount}).`);
 
@@ -437,18 +420,16 @@ app.post('/api/recharge', authenticate, async (req, res) => {
                     ref: ref
                 };
                 data = await callApi(DALTECH_URL, rcPayload, DALTECH_API_KEY);
-                
+
                 const isSuccess = (data.status === 'success' || data.Status === 'successful');
                 if (!isSuccess) throw new Error(data.msg || data.message || "Provider Error");
-                
+
                 let rawPins = data.pin || data.pins;
                 data.pins = typeof rawPins === 'string' ? (rawPins.includes(',') ? rawPins.split(',') : [rawPins]) : (Array.isArray(rawPins) ? rawPins : []);
 
             } else if (service === 'airtime') {
                 const payload = { network: networkId, amount: amount, mobile_number: phone_number, Ported_number: true, airtime_type: 'VTU' };
                 data = await callApi(`${MASKAWA_BASE_URL}/topup/`, payload, VTU_API_KEY);
-                const isSuccess = (data.status === 'success' || data.Status === 'successful' || data.success === true);
-                if (!isSuccess) throw new Error(data.msg || data.message || "Airtime purchase failed");
 
             } else if (service === 'data') {
                 const dataPayload = {
@@ -464,23 +445,18 @@ app.post('/api/recharge', authenticate, async (req, res) => {
             }
         } catch (apiError) {
             // --- REFUND LOGIC ---
-            // If the provider API fails, we refund the EXACT amount debited.
+            // If the provider API fails, we return the money to the user.
             await userRef.child('walletBalance').transaction((currentBalance) => {
-                if (currentBalance === null) return currentBalance;
-                return Number(currentBalance) + cost;
+                return (Number(currentBalance) || 0) + cost;
             });
             throw apiError;
         }
 
-            const isExplicitFailure = (data.Status && String(data.Status).toLowerCase().includes('fail')) || (data.status && String(data.status).toLowerCase().includes('fail')) || (data.success === 'false') || (data.success === false);
-
-        if (isExplicitFailure) {
-            throw new Error(data.msg || data.message || "Provider reported failure");
-        }
+        const isExplicitFailure = (data.Status && String(data.Status).toLowerCase().includes('fail')) || (data.status && String(data.status).toLowerCase().includes('fail')) || (data.success === 'false') || (data.success === false);
 
         // Common success handling for all services after deduction
         // 6. Update to Successful & Record Provider Response
-        const successUpdate = { 
+        const successUpdate = {
             status: 'Successful',
             providerResponse: data
         };
@@ -489,7 +465,7 @@ app.post('/api/recharge', authenticate, async (req, res) => {
 
         // 7. Return Success
         const pins = data.pins || (data.pin ? [data.pin] : (data.token ? [data.token] : []));
-        
+
         const response = {
             success: true,
             message: service === 'data' ? 'Data purchase successful' : (service === 'recharge-card' ? 'Recharge card generated successfully' : 'Transaction successful'),
@@ -515,24 +491,29 @@ app.post('/api/recharge', authenticate, async (req, res) => {
         // Extract detailed error message from provider response
         const errData = error.response?.data || {};
         const msg = (typeof errData === 'string' ? errData : (errData.message || errData.msg || errData.error || errData.detail)) || error.message || 'Transaction failed';
-        
+
         console.error('Recharge Endpoint Error:', {
             requestId: requestId,
             errorMessage: error.message,
             providerResponse: errData,
             stack: error.stack
         });
-        
+
         // Update logs to Failed
         if (userTxRef && adminTxRef) {
-            const failUpdate = { 
-                status: 'Failed', 
+            const failUpdate = {
+                status: 'Failed',
                 reason: msg,
                 providerResponse: errData || null
             };
             userTxRef.update(failUpdate).catch(console.error);
             adminTxRef.update(failUpdate).catch(console.error);
         }
+
+        // Refund wallet on failure
+        await userRef.child('walletBalance').transaction((currentBalance) => {
+            return (Number(currentBalance) || 0) + cost;
+        });
 
         // Show the generic "Transaction failed" message unless it's the specific "invalid plan" error
         let finalMsg = "Transaction failed. Please try again later.";
@@ -554,7 +535,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
 
         const snapshot = await db.ref(`transactions/${userId}`).limitToLast(limit).once('value');
         const transactions = [];
-        
+
         // snapshot.forEach iterates in key order (oldest to newest for push IDs)
         // We unshift to reverse array so newest is first
         snapshot.forEach(child => {
@@ -578,9 +559,9 @@ app.post('/api/settings/recharge-discount', async (req, res) => {
 
     try {
         // No need for `if (!db)` here due to middleware
-        
+
         await db.ref('settings/recharge_card/enable_discount').set(enabled);
-        
+
         res.json({ success: true, message: `Recharge card discount ${enabled ? 'enabled' : 'disabled'} successfully.` });
     } catch (error) {
         console.error('Settings Update Error:', error.message);
@@ -603,7 +584,7 @@ app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
             headers: { 'Authorization': `Token ${DALTECH_API_KEY}` },
             params: { network: networkId } // Filter by network if API supports it
         });
-        
+
         const daltechPlans = response.data.data; // Assuming plans are in a 'data' field
         if (!Array.isArray(daltechPlans)) {
             throw new Error("Invalid data plans format received from provider.");
@@ -621,11 +602,11 @@ app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
         res.json({ success: true, plans: plans });
     } catch (error) {
         console.error('Daltech Data Plans Fetch Error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to fetch data plans from provider', 
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch data plans from provider',
             error: error.message,
-            providerResponse: error.response?.data 
+            providerResponse: error.response?.data
         });
     }
 });
@@ -640,11 +621,11 @@ app.get('/api/daltech/plans', async (req, res) => {
         res.json({ success: true, data: response.data });
     } catch (error) {
         console.error('Daltech Fetch Error:', error.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to fetch plans from provider', 
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch plans from provider',
             error: error.message,
-            providerResponse: error.response?.data 
+            providerResponse: error.response?.data
         });
     }
 });
@@ -720,8 +701,8 @@ app.get('/api/settings/plan-ranges', async (req, res) => {
 // Get Maskawa Wallet Balance
 app.get('/api/balance/maskawa', async (req, res) => {
     try {
-        const data = await callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY, 'GET');
-        const balance = data.user?.wallet_balance || data.wallet_balance || 0;
+        const data = await callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY);
+        const balance = data.user?.wallet_balance || 0;
         res.json({ success: true, balance: Number(balance) });
     } catch (error) {
         console.error('Maskawa Balance Fetch Error:', error.message);
@@ -732,8 +713,8 @@ app.get('/api/balance/maskawa', async (req, res) => {
 // --- Specific Admin Balance Endpoints ---
 app.get('/api/admin/balance/daltech', async (req, res) => {
     try {
-        const data = await callApi('https://daltechsubapi.com.ng/api/user/', {}, DALTECH_API_KEY, 'GET');
-        res.json({ balance: Number(data.user?.wallet_balance || data.wallet_balance || 0) });
+        const data = await callApi('https://daltechsubapi.com.ng/api/user/', {}, DALTECH_API_KEY);
+        res.json({ balance: Number(data.wallet_balance || 0) });
     } catch (error) {
         console.error('Daltech Balance Error:', error.message);
         res.status(500).json({ balance: 0, error: error.message });
@@ -742,8 +723,8 @@ app.get('/api/admin/balance/daltech', async (req, res) => {
 
 app.get('/api/admin/balance/maskawa', async (req, res) => {
     try {
-        const data = await callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY, 'GET');
-        res.json({ balance: Number(data.user?.wallet_balance || data.wallet_balance || 0) });
+        const data = await callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY);
+        res.json({ balance: Number(data.user?.wallet_balance || 0) });
     } catch (error) {
         console.error('Maskawa Balance Error:', error.message);
         res.status(500).json({ balance: 0, error: error.message });
@@ -753,8 +734,8 @@ app.get('/api/admin/balance/maskawa', async (req, res) => {
 // Get Daltech Wallet Balance
 app.get('/api/balance/daltech', async (req, res) => {
     try {
-        const data = await callApi('https://daltechsubapi.com.ng/api/user/', {}, DALTECH_API_KEY, 'GET');
-        const balance = data.user?.wallet_balance || data.wallet_balance || 0;
+        const data = await callApi('https://daltechsubapi.com.ng/api/user/', {}, DALTECH_API_KEY);
+        const balance = data.wallet_balance || 0;
         res.json({ success: true, balance: Number(balance) });
     } catch (error) {
         console.error('Daltech Balance Fetch Error:', error.message);
@@ -766,17 +747,14 @@ app.get('/api/balance/daltech', async (req, res) => {
 app.get('/api/admin/provider-balances', async (req, res) => {
     try {
         const [maskawaRes, daltechRes] = await Promise.allSettled([
-            callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY, 'GET'),
-            callApi('https://daltechsubapi.com.ng/api/user/', {}, DALTECH_API_KEY, 'GET')
+            callApi(`${MASKAWA_BASE_URL}/user/`, {}, VTU_API_KEY),
+            callApi('https://daltechsubapi.com.ng/api/user/', {}, DALTECH_API_KEY)
         ]);
 
         const getBal = (res) => {
             if (res.status === 'rejected') return 'Error';
-            const data = res.value || {};
-            const balance = data.user?.wallet_balance || data.wallet_balance;
-            // Return 'Error' if the response body itself indicates a provider failure
-            if (balance === undefined && (data.status === 'fail' || data.Status === 'failed')) return 'Error';
-            return balance || 0;
+            const data = res.value;
+            return data.user?.wallet_balance || data.wallet_balance || 0;
         };
 
         res.json({
@@ -792,72 +770,7 @@ app.get('/api/admin/provider-balances', async (req, res) => {
     }
 });
 
-// --- Maskawa Admin Balance Endpoint ---
-app.get('/api/admin/maskawa-balance', async (req, res) => {
-    try {
-        const response = await axios.get(
-            "https://maskawasub.com/api/user/",
-            {
-                headers: {
-                    'Authorization': `Token ${process.env.VTU_API_KEY}`,
-                    'Content-Type': 'application/json',
-                },
-                timeout: 10000, // 10 seconds timeout
-            }
-        );
-
-        return res.json({
-            success: true,
-            balance: response.data?.user?.wallet_balance || response.data?.wallet_balance,
-            user: response.data?.user?.username || response.data?.username,
-        });
-
-    } catch (error) {
-        console.error("Maskawa Balance Error:", error.response?.data || error.message);
-
-        return res.status(500).json({
-            success: false,
-            message: "Unable to fetch balance",
-        });
-    }
-});
-
-// --- Daltech Admin Balance Endpoint ---
-app.get('/api/admin/daltech-balance', async (req, res) => {
-    try {
-        const response = await axios.get(
-            "https://daltechsubapi.com.ng/api/user/",
-            {
-                headers: {
-                    'Authorization': `Token ${process.env.DALTECH_API_KEY}`,
-                    'Content-Type': 'application/json',
-                },
-                timeout: 10000, // 10 seconds timeout
-            }
-        );
-
-        return res.json({
-            success: true,
-            balance: response.data?.user?.wallet_balance || response.data?.wallet_balance,
-            user: response.data?.user?.username || response.data?.username,
-        });
-
-    } catch (error) {
-        console.error("Daltech Balance Error:", error.response?.data || error.message);
-
-        return res.status(500).json({
-            success: false,
-            message: "Unable to fetch balance",
-        });
-    }
-});
-
 // --- 404 Handler for Unknown Routes ---
 app.use((req, res) => {
     res.status(404).json({ success: false, message: `Route not found: ${req.method} ${req.originalUrl}` });
-});
-
-// --- Global Stability Protection ---
-process.on("unhandledRejection", (err) => {
-    console.error("CRITICAL: Unhandled Rejection:", err);
 });
