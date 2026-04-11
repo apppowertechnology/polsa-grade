@@ -207,8 +207,19 @@ app.post('/api/recharge', async (req, res) => {
 
     // Declare refs outside try block to ensure they are accessible in catch for status updates
     let userTxRef, adminTxRef;
+    const lockRef = db.ref(`users/${userId}/isProcessing`);
 
     try {
+        // --- TRANSACTION LOCK: Prevent simultaneous purchases ---
+        const lockResult = await lockRef.transaction(current => {
+            if (current === true) return; // Abort if already locked
+            return true;
+        });
+
+        if (!lockResult.committed) {
+            return res.status(429).json({ success: false, message: 'Transaction in progress. Please wait for the current request to finish.' });
+        }
+
         // No need for `if (!db)` here due to middleware
 
         // Calculate correct cost for recharge cards (considering quantity and discount)
@@ -235,13 +246,14 @@ app.post('/api/recharge', async (req, res) => {
         adminTxRef = db.ref('payments').push();
         const firebaseTxId = userTxRef.key;
         const timestamp = new Date().toISOString();
+        let isDebited = false;
 
         const txData = {
             type: 'purchase',
             feature: service,
             amount: cost,
             profit: Number(profit) || 0,
-            status: 'Pending',
+            status: 'Processing',
             transactionId: requestId,
             date: timestamp,
             timestamp: timestamp, // Required for admin panel sorting/display
@@ -249,25 +261,36 @@ app.post('/api/recharge', async (req, res) => {
         };
 
         // Write 'Pending' state to both User History and Admin Payments
-        await userTxRef.set(txData);
-        await adminTxRef.set({ ...txData, userId, firebaseTxId, email: 'Processing...' });
+        await userTxRef.set({ ...txData, status: 'Pending' });
+        await adminTxRef.set({ ...txData, status: 'Pending', userId, firebaseTxId, email: 'Processing...' });
 
         // 2. Validate User & Wallet Balance
         const userRef = db.ref(`users/${userId}`);
         const userSnap = await userRef.once('value');
         const userVal = userSnap.val();
 
-        if (!userVal) throw new Error('User account not found.');
+        if (!userVal) {
+            await userTxRef.update({ status: 'Failed', reason: 'User not found' });
+            throw new Error('User account not found.');
+        }
 
         // Update Admin Log with correct User Details immediately
         const currentBalance = Number(userVal.walletBalance) || 0;
         const userEmail = userVal.email || userVal.fullName || 'Unknown';
-        // Fire and forget update to speed up response time slightly
-        adminTxRef.update({ email: userEmail, userName: userVal.fullName }).catch(console.error);
+        await adminTxRef.update({ email: userEmail, userName: userVal.fullName });
 
         if (currentBalance < cost) {
+            await userTxRef.update({ status: 'Failed', reason: 'Insufficient balance' });
+            await adminTxRef.update({ status: 'Failed', reason: 'Insufficient balance' });
             throw new Error('Insufficient wallet balance.');
         }
+
+        // --- STEP 1: INITIAL DEBIT (Safe/Atomic) ---
+        const debitResult = await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
+        if (!debitResult.committed) throw new Error('Deduction failed. Please try again.');
+        isDebited = true;
+        await userTxRef.update({ status: 'Processing' });
+        await adminTxRef.update({ status: 'Processing' });
 
         // 2. Prepare API Payload & Call
         let endpoint = '';
@@ -275,41 +298,16 @@ app.post('/api/recharge', async (req, res) => {
         let data = {};
 
         if (service === 'recharge-card') {
-            // --- RECHARGE CARD SPECIFIC FLOW (DALTECHSUB) ---
-            
-            // A. Validate Balance (No deduction yet)
-            const balanceSnap = await userRef.child('walletBalance').once('value');
-            const currentBal = Number(balanceSnap.val()) || 0;
-            
-            if (currentBal < cost) {
-                throw new Error('Insufficient wallet balance.');
-            }
-
             // B. Call Daltechsub API
             try {
                 const DALTECH_URL = 'https://daltechsubapi.com.ng/api/rechargepin/';
                 // DALTECH_API_KEY is already defined globally from process.env
                 const ref = `EPIN_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-
-                // Strict Predefined Mapping (Provider: Daltech)
-                // MTN=1, GLO=2, AIRTEL=3, 9MOBILE=4
-                const RC_PLAN_MAPPING = {
-                    '1': { '100': '1', '200': '2', '500': '3', '1000': '4' },       // MTN
-                    '2': { '100': '145', '200': '146', '500': '147', '1000': '148' }, // GLO
-                    '3': { '100': '153', '200': '154', '500': '155', '1000': '156' }, // AIRTEL
-                    '4': { '100': '149', '200': '150', '500': '151', '1000': '152' }  // 9MOBILE
-                };
-
-                const networkPlans = RC_PLAN_MAPPING[String(networkId)];
-                if (!networkPlans) {
-                    throw new Error(`Network ID ${networkId} is not supported for recharge cards.`);
-                }
-
-                // Direct mapping: Amount -> Plan ID
-                const planId = networkPlans[String(amount)];
-
+                
+                // Fix: Prefer the Plan ID sent from frontend (synced with DB) over hardcoded mappings
+                const planId = plan;
                 if (!planId) {
-                    throw new Error(`Invalid amount (₦${amount}). Available options: ₦100, ₦200, ₦500, ₦1000`);
+                    throw new Error(`Technical Error: Plan ID missing. Please refresh and try again.`);
                 }
 
                 const rcPayload = {
@@ -343,13 +341,10 @@ app.post('/api/recharge', async (req, res) => {
                     data.pins = [];
                 }
 
-                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
-
             } catch (error) {
-                console.error("RC Purchase Failed (No Deduction):", { message: error.message, response: error.response?.data });
+                console.error("RC Purchase API Call Failed:", { message: error.message, response: error.response?.data });
                 if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) throw new Error("Request timeout. Please try again.");
-                if (!error.response) throw new Error("Recharge service temporarily unavailable. Please try again later.");
-                throw error;
+                throw new Error(error.message || "Provider Error");
             }
 
         } else if (service === 'airtime') { // Existing Airtime Logic
@@ -362,15 +357,13 @@ app.post('/api/recharge', async (req, res) => {
                 throw new Error(data.message || data.error || 'Provider returned failure status');
             }
 
-            await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
-
         } else if (service === 'data') { // NEW DALTECHSUB DATA LOGIC
             const ref = `DATA_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
             const dataPayload = {
-                network: String(networkId),
+                network: Number(networkId),
                 phone: phone_number,
                 ref: ref,
-                plan: plan, // This is the plan_id from Daltech
+                plan: Number(plan), // Force to Number to fix "Invalid pk" error
                 ported_number: true
             };
 
@@ -388,13 +381,10 @@ app.post('/api/recharge', async (req, res) => {
                     throw new Error(`Provider Error: ${errorMsg}`);
                 }
 
-                await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
-
             } catch (error) {
-                console.error("Data Purchase Failed (No Deduction):", { message: error.message, response: error.response?.data });
+                console.error("Data Purchase API Call Failed:", { message: error.message, response: error.response?.data });
                 if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) throw new Error("Request timeout. Please try again.");
-                if (!error.response) throw new Error("Data service temporarily unavailable. Please try again later.");
-                throw error;
+                throw new Error(error.message || "Provider Error");
             }
 
         } else {
@@ -437,7 +427,14 @@ app.post('/api/recharge', async (req, res) => {
     } catch (error) {
         // Extract detailed error message from provider response
         const errData = error.response?.data || {};
-        const msg = (typeof errData === 'string' ? errData : (errData.message || errData.msg || errData.error || errData.detail)) || error.message || 'Transaction failed';
+        let msg = (typeof errData === 'string' ? errData : (errData.message || errData.msg || errData.error || errData.detail)) || error.message || 'Transaction failed';
+        
+        // UI Improvement: Clean up technical errors for users
+        if (msg.includes('insufficient balance') || msg.includes('balance is low')) {
+            msg = "Service temporarily unavailable. Our team has been notified.";
+        } else if (msg.length > 150) {
+            msg = "Something went wrong with the provider. Please try again later.";
+        }
         
         console.error('Recharge Endpoint Error:', {
             requestId: requestId,
@@ -445,12 +442,22 @@ app.post('/api/recharge', async (req, res) => {
             providerResponse: errData,
             stack: error.stack
         });
+
+        // --- STEP 2: AUTOMATIC REFUND ON FAILURE ---
+        let finalStatus = 'Failed';
+        if (isDebited) {
+            console.log(`Triggering automatic refund for user ${userId} amount ${cost}`);
+            await userRef.child('walletBalance').transaction(current => (Number(current) || 0) + cost);
+            isDebited = false;
+            finalStatus = 'Refunded';
+        }
         
-        // Update logs to Failed
+        // Update logs to Failed/Refunded
         if (userTxRef && adminTxRef) {
             const failUpdate = { 
-                status: 'Failed', 
+                status: finalStatus, 
                 reason: msg,
+                profit: 0,
                 providerResponse: errData || null
             };
             userTxRef.update(failUpdate).catch(console.error);
@@ -458,6 +465,9 @@ app.post('/api/recharge', async (req, res) => {
         }
 
         res.status(500).json({ success: false, message: msg });
+    } finally {
+        // Always release the lock
+        await lockRef.set(false).catch(err => console.error("Lock release failed:", err));
     }
 });
 
@@ -488,7 +498,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
 });
 
 // Update Recharge Card Discount Setting
-app.post('/api/settings/recharge-discount', async (req, res) => {
+app.post('/api/settings/recharge-discount', verifyFirebaseToken, async (req, res) => {
     const { enabled } = req.body;
 
     if (enabled === undefined || typeof enabled !== 'boolean') {
@@ -510,7 +520,7 @@ app.post('/api/settings/recharge-discount', async (req, res) => {
 // --- Dynamic Plan Management ---
 
 // New endpoint to fetch data plans from Daltech
-app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
+app.get('/api/daltech/data-plans/:networkId', verifyFirebaseToken, async (req, res) => {
     const { networkId } = req.params;
     if (!networkId) {
         return res.status(400).json({ success: false, message: 'Network ID is required.' });
@@ -550,7 +560,7 @@ app.get('/api/daltech/data-plans/:networkId', async (req, res) => {
 });
 
 // Existing endpoint to fetch RC plans from Daltech (Utility Endpoint for Admin Inspection)
-app.get('/api/daltech/plans', async (req, res) => {
+app.get('/api/daltech/plans', verifyFirebaseToken, async (req, res) => {
     try {
         const DALTECH_RC_KEY = DALTECH_API_KEY; // Use the environment variable for consistency
         const response = await axios.get('https://daltechsubapi.com.ng/api/epin-groups/', {
@@ -569,7 +579,7 @@ app.get('/api/daltech/plans', async (req, res) => {
 });
 
 // Save Plan Mapping to Firebase
-app.post('/api/settings/rc-plans', async (req, res) => {
+app.post('/api/settings/rc-plans', verifyFirebaseToken, async (req, res) => {
     // Expected payload: { "1": { "100": "5", "200": "6" }, "2": { ... } }
     const mappings = req.body;
     if (!mappings || typeof mappings !== 'object') {
