@@ -97,6 +97,28 @@ app.use((req, res, next) => {
     next();
 });
 
+// Middleware to verify Firebase Auth Token
+async function verifyFirebaseToken(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, message: 'Unauthorized: Missing token' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    if (!idToken || idToken === 'null') {
+        return res.status(401).json({ success: false, message: 'Unauthorized: No active Firebase session' });
+    }
+
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        req.user = decodedToken;
+        next();
+    } catch (error) {
+        console.error('Token Verification Error:', error.message);
+        res.status(401).json({ success: false, message: 'Unauthorized: Invalid token' });
+    }
+}
+
 // --- Helper Functions ---
 
 const getNetworkId = (networkStr) => {
@@ -285,13 +307,6 @@ app.post('/api/recharge', async (req, res) => {
             throw new Error('Insufficient wallet balance.');
         }
 
-        // --- STEP 1: INITIAL DEBIT (Safe/Atomic) ---
-        const debitResult = await userRef.child('walletBalance').transaction(current => (Number(current) || 0) - cost);
-        if (!debitResult.committed) throw new Error('Deduction failed. Please try again.');
-        isDebited = true;
-        await userTxRef.update({ status: 'Processing' });
-        await adminTxRef.update({ status: 'Processing' });
-
         // 2. Prepare API Payload & Call
         let endpoint = '';
         let payload = {};
@@ -392,6 +407,19 @@ app.post('/api/recharge', async (req, res) => {
         }
 
         // Common success handling for all services after deduction
+        // --- STEP 3: DEBIT ON SUCCESS (Safe/Atomic) ---
+        const debitResult = await userRef.child('walletBalance').transaction(current => {
+            const bal = Number(current) || 0;
+            if (bal < cost) return; // Ensure funds are still available
+            return bal - cost;
+        });
+
+        if (!debitResult.committed) {
+            // Provider succeeded but we couldn't charge user (rare due to lock)
+            throw new Error('Debit failed: Insufficient balance or internal error.');
+        }
+        isDebited = true;
+
         // 6. Update to Successful & Record Provider Response
         const successUpdate = { 
             status: 'Successful',
@@ -445,11 +473,13 @@ app.post('/api/recharge', async (req, res) => {
 
         // --- STEP 2: AUTOMATIC REFUND ON FAILURE ---
         let finalStatus = 'Failed';
+        let statusFeedback = "No charges applied.";
         if (isDebited) {
             console.log(`Triggering automatic refund for user ${userId} amount ${cost}`);
             await userRef.child('walletBalance').transaction(current => (Number(current) || 0) + cost);
             isDebited = false;
             finalStatus = 'Refunded';
+            statusFeedback = "Transaction refunded.";
         }
         
         // Update logs to Failed/Refunded
@@ -464,7 +494,7 @@ app.post('/api/recharge', async (req, res) => {
             adminTxRef.update(failUpdate).catch(console.error);
         }
 
-        res.status(500).json({ success: false, message: msg });
+        res.status(500).json({ success: false, message: `${msg}. ${statusFeedback}` });
     } finally {
         // Always release the lock
         await lockRef.set(false).catch(err => console.error("Lock release failed:", err));
@@ -521,6 +551,7 @@ app.post('/api/settings/recharge-discount', verifyFirebaseToken, async (req, res
 
 // New endpoint to fetch data plans from Daltech
 app.get('/api/daltech/data-plans/:networkId', verifyFirebaseToken, async (req, res) => {
+    console.log(`Sync request received for Network ID: ${req.params.networkId}`);
     const { networkId } = req.params;
     if (!networkId) {
         return res.status(400).json({ success: false, message: 'Network ID is required.' });
@@ -533,18 +564,21 @@ app.get('/api/daltech/data-plans/:networkId', verifyFirebaseToken, async (req, r
             params: { network: networkId } // Filter by network if API supports it
         });
         
-        const daltechPlans = response.data.data; // Assuming plans are in a 'data' field
+        // Robust parsing: handle both {data: []} and direct array responses
+        let daltechPlans = response.data;
+        if (daltechPlans && daltechPlans.data && Array.isArray(daltechPlans.data)) daltechPlans = daltechPlans.data;
+
         if (!Array.isArray(daltechPlans)) {
             throw new Error("Invalid data plans format received from provider.");
         }
 
         // Filter and normalize plans to include only relevant fields and vendor price
         const plans = daltechPlans.map(p => ({
-            plan_id: p.plan_id,
-            name: p.plan_name, // Assuming plan_name is the descriptive name
-            validity: p.validity,
-            price: p.price, // This is the vendor price
-            category: p.plan_type || 'General' // Assuming plan_type can be used for category
+            plan_id: p.plan_id || p.id,
+            name: p.plan_name || p.name || p.plan_type,
+            validity: p.validity || p.month_validate || '30 Days',
+            price: p.price || p.plan_amount || 0,
+            category: p.plan_type || 'General'
         }));
 
         res.json({ success: true, plans: plans });
