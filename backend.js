@@ -98,7 +98,7 @@ const DALTECH_API_KEY = process.env.DALTECH_API_KEY;
 
 // Middleware to check Firebase initialization and VTU_API_KEY before processing requests
 app.use((req, res, next) => {
-    if (!firebaseInitialized) {
+    if (!db && !firebaseInitialized) {
         return res.status(500).json({ success: false, message: `Backend service is not fully operational due to Firebase initialization failure. ${firebaseInitError || 'Check server logs for details.'}` });
     }
     if (!VTU_API_KEY || !DALTECH_API_KEY) {
