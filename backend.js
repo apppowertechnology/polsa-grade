@@ -13,6 +13,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- Keep-Alive Endpoint ---
+// Moved to the top to ensure it is always reachable and ultra-fast.
+app.get('/ping', (req, res) => {
+    const key = req.query.key;
+
+    if (key !== 'secure123') {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+    res.status(200).json({ success: true, message: "Server is alive" });
+});
+
 // --- Root Route ---
 app.get('/', (req, res) => {
     res.send('Backend is running!');
@@ -64,9 +75,8 @@ try {
             console.log("Firebase Realtime Database connection test successful ✅");
         })
         .catch(err => {
-            console.error("Firebase Realtime Database connection test failed: ❌", err.message);
-            firebaseInitError = `Firebase DB connection failed: ${err.message}`;
-            firebaseInitialized = false; // Mark as failed if DB connection fails
+            console.warn("Firebase Realtime Database connection test slow/failed: ⚠️", err.message);
+            // Don't set firebaseInitialized to false; SDK will retry automatically.
         });
 
 } catch (error) {
@@ -142,7 +152,7 @@ async function callApi(url, payload, apiKey) {
                 'Authorization': `Token ${apiKey}`,
                 'Content-Type': 'application/json' // Ensure content type is JSON
             },
-            timeout: 60000 // 60s timeout
+            timeout: 20000 // Reduced to 20s to ensure the backend can respond before Render's 30s limit
         });
         return response.data;
     } catch (error) {
@@ -497,8 +507,19 @@ app.post('/api/recharge', async (req, res) => {
         res.status(500).json({ success: false, message: `${msg}. ${statusFeedback}` });
     } finally {
         // Always release the lock
-        await lockRef.set(false).catch(err => console.error("Lock release failed:", err));
+        try {
+            await lockRef.set(false).catch(err => console.error("Lock release failed:", err));
+        } catch (e) {
+            console.error("Lock cleanup error:", e);
+        }
     }
+});
+
+// --- Global Error Handler ---
+// Ensures that any unhandled error returns JSON instead of an HTML page
+app.use((err, req, res, next) => {
+    console.error("CRITICAL UNHANDLED ERROR:", err);
+    res.status(500).json({ success: false, message: "Internal Server Error. Please try again later." });
 });
 
 // Get Transaction History
